@@ -86,15 +86,16 @@ def _load_audio_model():
     
     # GPU support: ONNX Runtime handles CUDA availability internally
     session = None
-    
+
     # Configure provider options with GPU memory management
+    clap_force_cpu = os.environ.get('CLAP_FORCE_CPU', '0') == '1'
     available_providers = ort.get_available_providers()
-    if 'CUDAExecutionProvider' in available_providers:
+    if 'CUDAExecutionProvider' in available_providers and not clap_force_cpu:
         gpu_device_id = 0
         cuda_visible = os.environ.get('CUDA_VISIBLE_DEVICES', '')
         if cuda_visible and cuda_visible != '-1':
             gpu_device_id = 0
-        
+
         cuda_options = {
             'device_id': gpu_device_id,
             'arena_extend_strategy': 'kSameAsRequested',
@@ -104,7 +105,10 @@ def _load_audio_model():
         logger.info(f"CUDA provider available - will attempt to use GPU (device_id={gpu_device_id})")
     else:
         provider_options = [('CPUExecutionProvider', {})]
-        logger.info("CUDA provider not available - using CPU only")
+        if clap_force_cpu:
+            logger.info("CLAP audio using CPU only (CLAP_FORCE_CPU=1)")
+        else:
+            logger.info("CUDA provider not available - using CPU only")
     
     # Create session — pass file path so ORT resolves external data natively
     def _create_session(model_input, providers, provider_opts):
@@ -534,6 +538,32 @@ def analyze_audio_file(audio_path: str) -> Tuple[Optional[np.ndarray], float, in
                 emb = outputs[0]  # shape (1, 512)
             except Exception as e:
                 # Handle memory allocation errors with cleanup and retry
+                err_str = str(e)
+                # cuBLAS/CUDA alloc failures on constrained GPU (e.g. Jetson Orin Nano):
+                # fall back to a fresh CPU-only session for remaining segments
+                if 'CUBLAS_STATUS_ALLOC_FAILED' in err_str or 'ALLOC_FAILED' in err_str or \
+                        'Failed to allocate memory' in err_str:
+                    logger.warning(
+                        f"CLAP GPU inference failed (segment {seg_idx}, OOM: {err_str[:120]}), "
+                        "switching remaining segments to CPU"
+                    )
+                    comprehensive_memory_cleanup(force_cuda=True, reset_onnx_pool=True)
+                    try:
+                        cpu_session = ort.InferenceSession(
+                            model_path,
+                            sess_options=sess_options,
+                            providers=['CPUExecutionProvider'],
+                            provider_options=[{}],
+                        )
+                        # Re-run current segment on CPU, then replace session for remainder
+                        outputs = cpu_session.run(None, onnx_inputs)
+                        emb = outputs[0]
+                        session = cpu_session
+                        all_embs.append(emb)
+                        continue
+                    except Exception as cpu_err:
+                        logger.error(f"CLAP CPU fallback also failed: {cpu_err}")
+                        raise
                 def cleanup_fn():
                     cleanup_cuda_memory(force=True)
                 def retry_fn():

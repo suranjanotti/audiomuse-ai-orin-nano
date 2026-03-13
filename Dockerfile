@@ -1,17 +1,16 @@
 # syntax=docker/dockerfile:1
 # AudioMuse-AI Dockerfile
-# Supports both CPU (ubuntu:24.04) and GPU (nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04) builds
+# Orin Nano build: uses NVIDIA L4T base image for Jetson hardware
 #
-# Build examples:
-#   CPU:  docker build -t audiomuse-ai .
-#   GPU:  docker build --build-arg BASE_IMAGE=nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04 -t audiomuse-ai-gpu .
+# Build example:
+#   docker build -t audiomuse-orin .
 
-ARG BASE_IMAGE=ubuntu:24.04
+ARG BASE_IMAGE=nvcr.io/nvidia/l4t-cuda:12.6.11-runtime
 
 # ============================================================================
 # Stage 1: Download ML models (cached separately for faster rebuilds)
 # ============================================================================
-FROM ubuntu:24.04 AS models
+FROM nvcr.io/nvidia/l4t-cuda:12.6.11-runtime AS models
 
 SHELL ["/bin/bash", "-lc"]
 
@@ -75,6 +74,16 @@ SHELL ["/bin/bash", "-c"]
 # Copy uv for fast package management (10-100x faster than pip)
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 
+# Add NVIDIA Jetson apt repo (provides libcudnn9-cuda-12 for JetPack 6 / L4T R36.4)
+# The l4t-cuda base image does not include this repo by default
+RUN set -ux; \
+    apt-get update && apt-get install -y --no-install-recommends ca-certificates wget gnupg; \
+    wget -qO /etc/apt/trusted.gpg.d/jetson-ota-public.asc \
+        "https://repo.download.nvidia.com/jetson/jetson-ota-public.asc"; \
+    echo "deb https://repo.download.nvidia.com/jetson/common r36.4 main" \
+        > /etc/apt/sources.list.d/nvidia-jetson.list; \
+    rm -rf /var/lib/apt/lists/*
+
 # Install system dependencies with exponential backoff retry and version pinning
 # Version pinning ensures reproducible builds across different build times
 # cuda-compiler is conditionally installed for NVIDIA base images (needed for cupy JIT)
@@ -84,18 +93,19 @@ RUN set -ux; \
         # Use noninteractive frontend to avoid tzdata prompts when installing tzdata
         if DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             python3 python3-pip python3-dev \
-            libfftw3-double3=3.3.10-1ubuntu3 libfftw3-dev \
-            libyaml-0-2=0.2.5-1build1 libyaml-dev \
-            libsamplerate0=0.2.2-4build1 libsamplerate0-dev \
-            libsndfile1=1.2.2-1ubuntu5.24.04.1 libsndfile1-dev \
+            libfftw3-dev \
+            libyaml-dev \
+            libsamplerate0-dev \
+            libsndfile1-dev \
             libopenblas-dev \
-            liblapack-dev=3.12.0-3build1.1 \
+            liblapack-dev \
             libpq-dev \
             ffmpeg wget curl \
             supervisor procps \
             gcc g++ \
             git vim redis-tools strace iputils-ping \
-            "$(if [[ "$BASE_IMAGE" =~ ^nvidia/cuda:([0-9]+)\.([0-9]+).+$ ]]; then echo "cuda-compiler-${BASH_REMATCH[1]}-${BASH_REMATCH[2]}"; fi)"; then \
+            libcudnn9-cuda-12 \
+            ; then \
             break; \
         fi; \
         n=$((n+1)); \
@@ -112,28 +122,25 @@ RUN set -ux; \
 # ============================================================================
 FROM base AS libraries
 
-ARG BASE_IMAGE
-
 WORKDIR /app
 
 # Copy requirements files
 COPY requirements/ /app/requirements/
 
-# Install Python packages with uv (combined in single layer for efficiency)
-# GPU builds: cupy, cuml, onnxruntime-gpu, voyager, torch (CUDA)
-# CPU builds: onnxruntime (CPU only), torch (CPU)
-# Note: --index-strategy unsafe-best-match resolves conflicts between pypi.nvidia.com and pypi.org
-RUN if [[ "$BASE_IMAGE" =~ ^nvidia/cuda: ]]; then \
-        echo "NVIDIA base image detected: installing GPU packages (cupy, cuml, onnxruntime-gpu, voyager, torch+cuda)"; \
-        uv pip install --system --no-cache --index-strategy unsafe-best-match -r /app/requirements/gpu.txt -r /app/requirements/common.txt || exit 1; \
-    else \
-        echo "CPU base image: installing all packages together for dependency resolution"; \
-        uv pip install --system --no-cache --index-strategy unsafe-best-match -r /app/requirements/cpu.txt -r /app/requirements/common.txt || exit 1; \
-    fi \
-    && echo "Verifying psycopg2 installation..." \
-    && python3 -c "import psycopg2; print('psycopg2 OK')" \
-    && find /usr/local/lib/python3.12/dist-packages -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true \
-    && find /usr/local/lib/python3.12/dist-packages -type f \( -name "*.pyc" -o -name "*.pyo" \) -delete
+# Install Python packages with uv
+# Orin Nano (L4T/Jetson ARM64): common packages only; onnxruntime installed separately
+# from the NVIDIA Jetson wheel (avoids version conflict with cpu.txt pin)
+RUN echo "Jetson L4T (aarch64): installing common packages"; \
+    uv pip install --system --no-cache --index-strategy unsafe-best-match -r /app/requirements/jetson-common.txt || exit 1; \
+    # Install onnxruntime-gpu 1.23.0 for Jetson JetPack 6 / CUDA 12.6 (cuDNN 9) \
+    # Source: https://pypi.jetson-ai-lab.io/jp6/cu126 (built against libcudnn.so.9) \
+    pip3 install --no-cache-dir \
+        "https://pypi.jetson-ai-lab.io/jp6/cu126/+f/4eb/e6a8902dc7708/onnxruntime_gpu-1.23.0-cp310-cp310-linux_aarch64.whl" || exit 1; \
+    echo "Verifying psycopg2 installation..." && \
+    python3 -c "import psycopg2; print('psycopg2 OK')" && \
+    PY_VER=$(python3 -c "import sys; print(f'python{sys.version_info.major}.{sys.version_info.minor}')") && \
+    find /usr/local/lib/$PY_VER/dist-packages -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true && \
+    find /usr/local/lib/$PY_VER/dist-packages -type f \( -name "*.pyc" -o -name "*.pyo" \) -delete 2>/dev/null || true
 
 # Download HuggingFace models (BERT, RoBERTa, BART, T5) from GitHub release
 # These are the text encoders needed by laion-clap library for text embeddings
@@ -200,14 +207,13 @@ WORKDIR /app
 RUN set -eux; \
     apt-get update && apt-get install -y --no-install-recommends tzdata && rm -rf /var/lib/apt/lists/*
 
-# Copy Python packages from libraries stage
-COPY --from=libraries /usr/local/lib/python3.12/dist-packages/ /usr/local/lib/python3.12/dist-packages/
+# Copy Python packages from libraries stage (version-agnostic via shell)
+RUN --mount=from=libraries,source=/usr/local/lib,target=/mnt/libs \
+    cp -a /mnt/libs/. /usr/local/lib/
 # Copy console entrypoints (gunicorn, etc.) from libraries stage
 COPY --from=libraries /usr/local/bin/ /usr/local/bin/
 # Copy HuggingFace cache (RoBERTa model) from libraries stage
 COPY --from=libraries /app/.cache/huggingface/ /app/.cache/huggingface/
-# Copy console entrypoints (gunicorn, etc.) from libraries stage
-COPY --from=libraries /usr/local/bin/ /usr/local/bin/
 
 # Verify cache was copied correctly
 RUN ls -lah /app/.cache/huggingface/ && \

@@ -1,0 +1,2 @@
+# Jetson/L4T aarch64 - onnxruntime installed separately from NVIDIA Jetson wheel
+# See Dockerfile for the wheel URL

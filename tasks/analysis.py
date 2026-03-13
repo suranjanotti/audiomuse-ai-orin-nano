@@ -356,7 +356,13 @@ def analyze_track(file_path, mood_labels_list, model_paths, onnx_sessions=None):
         if not spec_patches:
             logger.warning(f"Track too short to create spectrogram patches: {os.path.basename(file_path)}")
             return None, None
-        
+
+        # Cap number of patches to limit memory usage on Orin Nano
+        MAX_PATCHES = 32
+        if len(spec_patches) > MAX_PATCHES:
+            idx = np.linspace(0, len(spec_patches) - 1, num=MAX_PATCHES, dtype=int)
+            spec_patches = [spec_patches[i] for i in idx]
+
         transposed_patches = np.array(spec_patches).transpose(0, 2, 1)
 
         # =================================================================
@@ -380,14 +386,16 @@ def analyze_track(file_path, mood_labels_list, model_paths, onnx_sessions=None):
     should_cleanup_sessions = False
     
     # Configure provider options for GPU memory management (used for main and secondary models)
+    # MUSICNN_FORCE_CPU=1 disables CUDA for MusiCNN (needed on Orin: cuDNN 8.9 BatchNorm fails)
+    musicnn_force_cpu = os.environ.get('MUSICNN_FORCE_CPU', '0') == '1'
     available_providers = ort.get_available_providers()
-    if 'CUDAExecutionProvider' in available_providers:
+    if 'CUDAExecutionProvider' in available_providers and not musicnn_force_cpu:
         # Get GPU device ID from environment or default to 0
         gpu_device_id = 0
         cuda_visible = os.environ.get('CUDA_VISIBLE_DEVICES', '')
         if cuda_visible and cuda_visible != '-1':
             gpu_device_id = 0
-        
+
         cuda_options = {
             'device_id': gpu_device_id,
             'arena_extend_strategy': 'kSameAsRequested',  # Prevent memory fragmentation
@@ -398,7 +406,10 @@ def analyze_track(file_path, mood_labels_list, model_paths, onnx_sessions=None):
         logger.info(f"CUDA provider available - attempting to use GPU for analysis (device_id={gpu_device_id})")
     else:
         provider_options = [('CPUExecutionProvider', {})]
-        logger.info("CUDA provider not available - using CPU only")
+        if musicnn_force_cpu:
+            logger.info("MusiCNN using CPU only (MUSICNN_FORCE_CPU=1)")
+        else:
+            logger.info("CUDA provider not available - using CPU only")
     
     try:
         # Use pre-loaded sessions if provided, otherwise load per-song
@@ -440,52 +451,54 @@ def analyze_track(file_path, mood_labels_list, model_paths, onnx_sessions=None):
         embedding_feed_dict = {DEFINED_TENSOR_NAMES['embedding']['input']: final_patches}
         try:
             embeddings_per_patch = run_inference(embedding_sess, embedding_feed_dict, DEFINED_TENSOR_NAMES['embedding']['output'])
-        except ort.capi.onnxruntime_pybind11_state.RuntimeException as e:
-            if "Failed to allocate memory" in str(e):
-                logger.warning(f"GPU OOM detected for {os.path.basename(file_path)} during embedding inference, attempting CPU fallback...")
-                
+        except (ort.capi.onnxruntime_pybind11_state.RuntimeException,
+                ort.capi.onnxruntime_pybind11_state.Fail) as e:
+            if "Failed to allocate memory" in str(e) or "CUDNN" in str(e) or "CUDA" in str(e):
+                logger.warning(f"GPU inference failed for {os.path.basename(file_path)} during embedding ({type(e).__name__}), falling back to CPU...")
+
                 # Cleanup old session and recreate with CPU
                 if should_cleanup_sessions:
                     cleanup_onnx_session(embedding_sess, "embedding")
-                
+
                 # Use comprehensive cleanup for OOM errors
                 comprehensive_memory_cleanup(force_cuda=True, reset_onnx_pool=True)
-                
+
                 # Create CPU session
                 embedding_sess = ort.InferenceSession(
                     model_paths['embedding'],
                     providers=['CPUExecutionProvider']
                 )
-                
+
                 # Retry with CPU session
                 embeddings_per_patch = run_inference(embedding_sess, embedding_feed_dict, DEFINED_TENSOR_NAMES['embedding']['output'])
-                logger.info(f"Successfully completed embedding inference on CPU after OOM")
+                logger.info(f"Successfully completed embedding inference on CPU after GPU failure")
             else:
                 raise
         
         prediction_feed_dict = {DEFINED_TENSOR_NAMES['prediction']['input']: embeddings_per_patch}
         try:
             mood_logits = run_inference(prediction_sess, prediction_feed_dict, DEFINED_TENSOR_NAMES['prediction']['output'])
-        except ort.capi.onnxruntime_pybind11_state.RuntimeException as e:
-            if "Failed to allocate memory" in str(e):
-                logger.warning(f"GPU OOM detected for {os.path.basename(file_path)} during prediction inference, attempting CPU fallback...")
-                
+        except (ort.capi.onnxruntime_pybind11_state.RuntimeException,
+                ort.capi.onnxruntime_pybind11_state.Fail) as e:
+            if "Failed to allocate memory" in str(e) or "CUDNN" in str(e) or "CUDA" in str(e):
+                logger.warning(f"GPU inference failed for {os.path.basename(file_path)} during prediction ({type(e).__name__}), falling back to CPU...")
+
                 # Cleanup old session and recreate with CPU
                 if should_cleanup_sessions:
                     cleanup_onnx_session(prediction_sess, "prediction")
-                
+
                 # Use comprehensive cleanup for OOM errors
                 comprehensive_memory_cleanup(force_cuda=True, reset_onnx_pool=True)
-                
+
                 # Create CPU session
                 prediction_sess = ort.InferenceSession(
                     model_paths['prediction'],
                     providers=['CPUExecutionProvider']
                 )
-                
+
                 # Retry with CPU session
                 mood_logits = run_inference(prediction_sess, prediction_feed_dict, DEFINED_TENSOR_NAMES['prediction']['output'])
-                logger.info(f"Successfully completed prediction inference on CPU after OOM")
+                logger.info(f"Successfully completed prediction inference on CPU after GPU failure")
             else:
                 raise
         
@@ -715,18 +728,19 @@ def analyze_album_task(album_id, album_name, top_n_moods, parent_task_id):
                         if onnx_sessions is None:
                             logger.info(f"Lazy-loading MusiCNN models for album: {album_name}")
                             onnx_sessions = {}
+                            musicnn_force_cpu = os.environ.get('MUSICNN_FORCE_CPU', '0') == '1'
                             available_providers = ort.get_available_providers()
-                            
-                            if 'CUDAExecutionProvider' in available_providers:
+
+                            if 'CUDAExecutionProvider' in available_providers and not musicnn_force_cpu:
                                 gpu_device_id = 0
                                 cuda_visible = os.environ.get('CUDA_VISIBLE_DEVICES', '')
                                 if cuda_visible and cuda_visible != '-1':
                                     gpu_device_id = 0
                                 cuda_options = {
                                     'device_id': gpu_device_id,
-                                    'arena_extend_strategy': 'kSameAsRequested',  # Prevent memory fragmentation
-                                    'cudnn_conv_algo_search': 'EXHAUSTIVE',      # Find memory-efficient algorithms
-                                    'do_copy_in_default_stream': True,           # Better memory sync
+                                    'arena_extend_strategy': 'kSameAsRequested',
+                                    'cudnn_conv_algo_search': 'EXHAUSTIVE',
+                                    'do_copy_in_default_stream': True,
                                 }
                                 provider_options = [('CUDAExecutionProvider', cuda_options), ('CPUExecutionProvider', {})]
                             else:
@@ -735,11 +749,22 @@ def analyze_album_task(album_id, album_name, top_n_moods, parent_task_id):
                             try:
                                 for model_name, model_path in model_paths.items():
                                     try:
-                                        onnx_sessions[model_name] = ort.InferenceSession(
+                                        sess = ort.InferenceSession(
                                             model_path,
                                             providers=[p[0] for p in provider_options],
                                             provider_options=[p[1] for p in provider_options]
                                         )
+                                        # Warmup: verify GPU inference works for this model
+                                        inp = sess.get_inputs()[0]
+                                        dummy_shape = [1 if (d is None or not isinstance(d, int)) else d for d in inp.shape]
+                                        dummy_shape[0] = 1
+                                        dummy = np.zeros(dummy_shape, dtype=np.float32)
+                                        try:
+                                            sess.run(None, {inp.name: dummy})
+                                        except Exception as warmup_err:
+                                            logger.warning(f"GPU warmup failed for {model_name} ({warmup_err}), falling back to CPU")
+                                            sess = ort.InferenceSession(model_path, providers=['CPUExecutionProvider'])
+                                        onnx_sessions[model_name] = sess
                                     except Exception:
                                         onnx_sessions[model_name] = ort.InferenceSession(
                                             model_path,
@@ -763,16 +788,17 @@ def analyze_album_task(album_id, album_name, top_n_moods, parent_task_id):
                             
                             # Recreate sessions
                             onnx_sessions = {}
+                            musicnn_force_cpu = os.environ.get('MUSICNN_FORCE_CPU', '0') == '1'
                             available_providers = ort.get_available_providers()
-                            
-                            if 'CUDAExecutionProvider' in available_providers:
+
+                            if 'CUDAExecutionProvider' in available_providers and not musicnn_force_cpu:
                                 gpu_device_id = 0
                                 cuda_visible = os.environ.get('CUDA_VISIBLE_DEVICES', '')
                                 if cuda_visible and cuda_visible != '-1':
                                     gpu_device_id = 0
                                 cuda_options = {
                                     'device_id': gpu_device_id,
-                                    'arena_extend_strategy': 'kSameAsRequested',  # Prevent memory fragmentation
+                                    'arena_extend_strategy': 'kSameAsRequested',
                                     'cudnn_conv_algo_search': 'EXHAUSTIVE',
                                     'do_copy_in_default_stream': True,
                                 }
@@ -783,11 +809,22 @@ def analyze_album_task(album_id, album_name, top_n_moods, parent_task_id):
                             try:
                                 for model_name, model_path in model_paths.items():
                                     try:
-                                        onnx_sessions[model_name] = ort.InferenceSession(
+                                        sess = ort.InferenceSession(
                                             model_path,
                                             providers=[p[0] for p in provider_options],
                                             provider_options=[p[1] for p in provider_options]
                                         )
+                                        # Warmup: verify GPU inference works for this model
+                                        inp = sess.get_inputs()[0]
+                                        dummy_shape = [1 if (d is None or not isinstance(d, int)) else d for d in inp.shape]
+                                        dummy_shape[0] = 1
+                                        dummy = np.zeros(dummy_shape, dtype=np.float32)
+                                        try:
+                                            sess.run(None, {inp.name: dummy})
+                                        except Exception as warmup_err:
+                                            logger.warning(f"GPU warmup failed for {model_name} ({warmup_err}), falling back to CPU")
+                                            sess = ort.InferenceSession(model_path, providers=['CPUExecutionProvider'])
+                                        onnx_sessions[model_name] = sess
                                     except Exception:
                                         onnx_sessions[model_name] = ort.InferenceSession(
                                             model_path,

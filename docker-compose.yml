@@ -1,0 +1,112 @@
+# Remember to scale the worker to minimum 2
+# docker compose up -d --scale audiomuse-ai-worker=2
+services:
+  # Redis service for RQ (task queue)
+  redis:
+    image: redis:7-alpine
+    container_name: audiomuse-redis
+    ports:
+      - "6379:6379" # Expose Redis port to the host
+    volumes:
+      - redis-data-audiomuse-ai:/data # Persistent storage for Redis data
+    restart: unless-stopped
+
+  # PostgreSQL database service
+  postgres:
+    image: postgres:15-alpine
+    container_name: audiomuse-postgres
+    environment:
+      POSTGRES_USER: "audiomuse"
+      POSTGRES_PASSWORD: "CnuYjkxilRtCbK"
+      POSTGRES_DB: "audiomusedb"
+    ports:
+      - "${POSTGRES_PORT}:5432" # Expose PostgreSQL port to the host
+    volumes:
+      - postgres-data-audiomuse-ai:/var/lib/postgresql/data # Persistent storage for PostgreSQL data
+    restart: unless-stopped
+
+  # AudioMuse-AI Flask application service
+  audiomuse-ai-flask:
+    image: audiomuse-orin:latest
+    container_name: audiomuse-ai-flask-app
+    ports:
+      - "8006:8000"
+    environment:
+      SERVICE_TYPE: "flask"
+      MEDIASERVER_TYPE: "jellyfin"
+      JELLYFIN_URL: "http://192.168.8.214:8096"  # NucBox K9 IP
+      JELLYFIN_USER_ID: "6942f33d18724060bc118d8962662d64"
+      JELLYFIN_TOKEN: "e7d8461843be46aa9bffb5e419953d7b"
+#      MEDIASERVER_TYPE: "navidrome"
+#      NAVIDROME_URL: "http://192.168.0.214:4533" #for example http://192.168.3.13:4533/
+#      NAVIDROME_USER: "suranjan"
+#      NAVIDROME_PASSWORD: "EHS9pbwZhxgpuJ"
+      POSTGRES_USER: "audiomuse"
+      POSTGRES_PASSWORD: "CnuYjkxilRtCbK"
+      POSTGRES_DB: "audiomusedb"
+      POSTGRES_HOST: "postgres"
+      POSTGRES_PORT: "5432"
+      REDIS_URL: "redis://redis:6379/0"
+      # GEMINI_API_KEY: "YOUR_GEMINI_API_KEY_HERE"
+      TEMP_DIR: "/app/temp_audio"
+    volumes:
+      - temp-audio-flask:/app/temp_audio
+    depends_on:
+      - redis
+      - postgres
+    restart: unless-stopped
+
+  # AudioMuse-AI RQ Worker service
+  audiomuse-ai-worker:
+    image: audiomuse-orin:latest
+    runtime: nvidia
+    environment:
+      SERVICE_TYPE: "worker"
+      MEDIASERVER_TYPE: "jellyfin"
+      JELLYFIN_URL: "http://192.168.8.214:8096"  # NucBox K9 IP
+      JELLYFIN_USER_ID: "6942f33d18724060bc118d8962662d64"
+      JELLYFIN_TOKEN: "e7d8461843be46aa9bffb5e419953d7b"
+#      MEDIASERVER_TYPE: "navidrome"
+#      NAVIDROME_URL: "http://192.168.0.214:4533" #for example http://192.168.3.13:4533/
+#      NAVIDROME_USER: "suranjan"
+#      NAVIDROME_PASSWORD: "EHS9pbwZhxgpuJ"
+      POSTGRES_USER: "audiomuse"
+      POSTGRES_PASSWORD: "CnuYjkxilRtCbK"
+      POSTGRES_DB: "audiomusedb"
+      POSTGRES_HOST: "postgres"
+      POSTGRES_PORT: "5432"
+      REDIS_URL: "redis://redis:6379/0"
+      AI_MODEL_PROVIDER: "OLLAMA"        # OLLAMA | GEMINI | NONE
+      OLLAMA_SERVER_URL: "http://100.76.66.8:11434"        # http://100.67.220.92:11434
+      OLLAMA_MODEL_NAME: "mistral:7b"         # mistral:7b
+      # GEMINI_API_KEY: "YOUR_GEMINI_API_KEY_HERE"
+      TEMP_DIR: "/app/temp_audio"
+      NVIDIA_VISIBLE_DEVICES: "all"
+      # Suppress onnxruntime C++ warning logs (e.g. Conv fallback mode notices)
+      ORT_LOGGING_LEVEL: "3"
+      # Override Dockerfile CPU-only optimization flags (set for x86 Intel, harmful on Jetson GPU)
+      ORT_DISABLE_ALL_OPTIMIZATIONS: "0"
+      ORT_DISABLE_AVX512: "0"
+      ORT_FORCE_SHARED_PROVIDER: "0"
+      ORT_DISABLE_MEMORY_PATTERN_OPTIMIZATION: "0"
+      # Orin Nano 8GB unified RAM: GPU OOM when default+high workers run simultaneously.
+      # Force CPU to avoid cuBLAS/cuDNN alloc failures.
+      MUSICNN_FORCE_CPU: "1"
+      # CLAP_FORCE_CPU: "1"  # uncomment if CUBLAS_STATUS_ALLOC_FAILED reappears
+    volumes:
+      - temp-audio-worker:/app/temp_audio
+      - /usr/lib/aarch64-linux-gnu/nvidia/:/usr/lib/aarch64-linux-gnu/nvidia/
+      - /usr/lib/aarch64-linux-gnu/tegra/:/usr/lib/aarch64-linux-gnu/tegra/
+      - /usr/local/cuda/lib64/:/usr/local/cuda/lib64/
+      - /usr/local/cuda/:/usr/local/cuda/  # if headers / tool directories needed      # also any other TensorRT related .so
+    depends_on:
+      - redis
+      - postgres
+    restart: unless-stopped
+
+# Define volumes for persistent data and temporary files
+volumes:
+  redis-data-audiomuse-ai:
+  postgres-data-audiomuse-ai:
+  temp-audio-flask:
+  temp-audio-worker:

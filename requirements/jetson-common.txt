@@ -1,0 +1,42 @@
+# Jetson/L4T aarch64 equivalent of common.txt, with Python 3.10 compatible version pins
+# scipy 1.16.3 and scikit-learn 1.8.0 require Python>=3.11, so use latest 3.10-compatible versions
+numpy==1.26.4
+scipy==1.15.3
+numba==0.60.0
+soundfile==0.13.1
+Flask
+Flask-Cors
+redis
+requests
+scikit-learn==1.7.2
+rq
+pyyaml
+six
+rapidfuzz
+psycopg2-binary
+ftfy
+flasgger
+sqlglot
+google-genai==1.57.0
+mistralai>=1.11.1,<2.0.0
+umap-learn
+# pozalabs-pydub requires Python>=3.11; use upstream pydub on Python 3.10
+pydub
+python-mpd2
+psutil
+onnx==1.20.0
+resampy
+librosa==0.11.0
+mutagen==1.47.0
+flatbuffers
+packaging
+protobuf
+sympy
+mcp
+httpx
+voyager==2.1.0
+transformers==4.57.3
+sentencepiece==0.2.1
+PyJWT>=2.8.0
+gunicorn
+zstandard
