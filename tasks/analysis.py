@@ -357,11 +357,6 @@ def analyze_track(file_path, mood_labels_list, model_paths, onnx_sessions=None):
             logger.warning(f"Track too short to create spectrogram patches: {os.path.basename(file_path)}")
             return None, None
 
-        # Cap number of patches to limit memory usage on Orin Nano
-        MAX_PATCHES = 32
-        if len(spec_patches) > MAX_PATCHES:
-            idx = np.linspace(0, len(spec_patches) - 1, num=MAX_PATCHES, dtype=int)
-            spec_patches = [spec_patches[i] for i in idx]
 
         transposed_patches = np.array(spec_patches).transpose(0, 2, 1)
 

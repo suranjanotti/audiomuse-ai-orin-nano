@@ -92,7 +92,7 @@ services:
       # Orin Nano 8GB unified RAM: GPU OOM when default+high workers run simultaneously.
       # Force CPU to avoid cuBLAS/cuDNN alloc failures.
       MUSICNN_FORCE_CPU: "1"
-      # CLAP_FORCE_CPU: "1"  # uncomment if CUBLAS_STATUS_ALLOC_FAILED reappears
+      CLAP_FORCE_CPU: "1"
     volumes:
       - temp-audio-worker:/app/temp_audio
       - /usr/lib/aarch64-linux-gnu/nvidia/:/usr/lib/aarch64-linux-gnu/nvidia/

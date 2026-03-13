@@ -71,6 +71,7 @@ def _load_audio_model():
     sess_options = ort.SessionOptions()
     sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
     sess_options.log_severity_level = 3  # 0=Verbose, 1=Info, 2=Warning, 3=Error, 4=Fatal
+    sess_options.log_verbosity_level = 0  # suppress verbose C++ warnings (e.g. Conv fallback)
     
     # Threading configuration based on CLAP_PYTHON_MULTITHREADS:
     # - False (default): Let ONNX Runtime decide thread counts automatically
