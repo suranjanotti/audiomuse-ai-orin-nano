@@ -1,11 +1,12 @@
-name: Build, Test, and Push AudioMuse AI Docker Image with NVIDIA support
+name: Build, Test, and Push AudioMuse AI Docker Image
 
 on:
   push:
     branches:
-      - main      # Trigger for 'latest-nvidia'
+      - main        # Trigger for 'latest'
+      - devel       # Trigger for 'devel'
     tags:
-      - 'v*.*.*'  # Trigger for version tags like v1.0.0
+      - 'v*.*.*'    # Trigger for version tags like v1.0.0
 
 jobs:
   build-and-test:
@@ -16,18 +17,6 @@ jobs:
       packages: write # Allow pushing to GitHub Container Registry
 
     steps:
-      - name: Free Disk Space (Ubuntu)
-        uses: jlumbroso/free-disk-space@main
-        with:
-          swap-storage: false
-          large-packages: false
-          tool-cache: true
-          android: true
-          dotnet: true
-          haskell: true
-          docker-images: true
-
-
       - name: Checkout code
         uses: actions/checkout@v4
         # Removed lfs: true as models are now downloaded directly in Dockerfile
@@ -51,15 +40,18 @@ jobs:
           ALL_TAGS=""
 
           if [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
-            # When compiling from main, push to 'latest-nvidia'
-            MAIN_TAG="ghcr.io/$REPO_NAME_LOWER:latest-nvidia"
+            MAIN_TAG="ghcr.io/$REPO_NAME_LOWER:latest"
             ALL_TAGS="$MAIN_TAG"
             echo "Building latest tag: $MAIN_TAG"
 
+          elif [[ "${GITHUB_REF}" == "refs/heads/devel" ]]; then
+            DEV_TAG="ghcr.io/$REPO_NAME_LOWER:devel"
+            ALL_TAGS="$DEV_TAG"
+            echo "Building devel tag: $DEV_TAG"
+
           elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            # When compiling from a version tag, create a versioned tag with '-nvidia' suffix
             VERSION_TAG=$(echo "${GITHUB_REF}" | sed -e 's|refs/tags/v||g')
-            VERSIONED_TAG="ghcr.io/$REPO_NAME_LOWER:${VERSION_TAG}-nvidia"
+            VERSIONED_TAG="ghcr.io/$REPO_NAME_LOWER:${VERSION_TAG}"
             ALL_TAGS="$VERSIONED_TAG"
             echo "Building versioned tag: $VERSIONED_TAG"
           fi
@@ -78,8 +70,6 @@ jobs:
           push: false # Do not push yet, just build
           tags: ${{ steps.docker_tags.outputs.test_tag }}
           load: true # Load image into Docker daemon for immediate use
-          build-args: |
-            BASE_IMAGE=nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
 
       - name: Run Flask App Container Health Check
         run: |
@@ -228,5 +218,3 @@ jobs:
           file: ./Dockerfile
           push: true
           tags: ${{ steps.docker_tags.outputs.docker_tags }}
-          build-args: |
-            BASE_IMAGE=nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
