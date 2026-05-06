@@ -89,11 +89,10 @@ services:
       ORT_DISABLE_AVX512: "0"
       ORT_FORCE_SHARED_PROVIDER: "0"
       ORT_DISABLE_MEMORY_PATTERN_OPTIMIZATION: "0"
-      # Small ONNX models pinned to CPU for determinism + free GPU memory.
-      # Heavy models (CLAP text encoder, Whisper, Qwen, MarianMT) keep running through
-      # whichever provider their library picks (onnxruntime-gpu / torch).
-      MUSICNN_FORCE_CPU: "1"
-      CLAP_FORCE_CPU: "1"
+      # Mirror Intel device assignment: ALL ONNX models on CUDA (MusiCNN, DCLAP,
+      # CLAP text, MuLan), torch models (Whisper, MarianMT, e5) on CUDA via the
+      # Jetson torch wheel, Qwen on CPU (llama_cpp_python n_gpu_layers=0 is hardcoded).
+      # Set MUSICNN_FORCE_CPU=1 / CLAP_FORCE_CPU=1 here if you ever need to fall back.
     volumes:
       - ./data/temp-audio-worker:/app/temp_audio
       - /usr/lib/aarch64-linux-gnu/nvidia/:/usr/lib/aarch64-linux-gnu/nvidia/

@@ -40,10 +40,11 @@ huggingface-hub==0.36.2
 sentencepiece==0.2.1
 
 # --- v4 pipeline (lyrics: Whisper + Qwen + MarianMT + e5) -------------------
-# torch on aarch64 from PyPI is CPU-only. For CUDA-accelerated Whisper/Qwen on
-# Jetson, swap these for the matching cu126 wheels from pypi.jetson-ai-lab.io.
-torch==2.6.0
-torchaudio==2.6.0
+# torch / torchaudio: Jetson cu126 wheels from pypi.jetson-ai-lab.io so Whisper,
+# MarianMT and e5 can run on the Jetson GPU (mirrors Intel, which runs them on
+# the iGPU via torch+xpu). Pinned 2.8.0 because cu126 has no 2.6.0 wheel.
+torch @ https://pypi.jetson-ai-lab.io/jp6/cu126/+f/62a/1beee9f2f1470/torch-2.8.0-cp310-cp310-linux_aarch64.whl
+torchaudio @ https://pypi.jetson-ai-lab.io/jp6/cu126/+f/81a/775c8af36ac85/torchaudio-2.8.0-cp310-cp310-linux_aarch64.whl
 openai-whisper==20250625
 silero-vad==5.1.2
 llama-cpp-python==0.3.21
