@@ -89,10 +89,11 @@ services:
       ORT_DISABLE_AVX512: "0"
       ORT_FORCE_SHARED_PROVIDER: "0"
       ORT_DISABLE_MEMORY_PATTERN_OPTIMIZATION: "0"
-      # GPU mode: both MusiCNN and CLAP on GPU
-      # If OOM/cuBLAS errors reappear, set MUSICNN_FORCE_CPU=1 and/or CLAP_FORCE_CPU=1
-      # MUSICNN_FORCE_CPU: "1"
-      # CLAP_FORCE_CPU: "1"
+      # Small ONNX models pinned to CPU for determinism + free GPU memory.
+      # Heavy models (CLAP text encoder, Whisper, Qwen, MarianMT) keep running through
+      # whichever provider their library picks (onnxruntime-gpu / torch).
+      MUSICNN_FORCE_CPU: "1"
+      CLAP_FORCE_CPU: "1"
     volumes:
       - temp-audio-worker:/app/temp_audio
       - /usr/lib/aarch64-linux-gnu/nvidia/:/usr/lib/aarch64-linux-gnu/nvidia/

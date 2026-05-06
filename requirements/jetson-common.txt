@@ -35,8 +35,24 @@ sympy
 mcp
 httpx
 voyager==2.1.0
-transformers==4.57.3
+transformers==4.57.6
+huggingface-hub==0.36.2
 sentencepiece==0.2.1
-PyJWT>=2.8.0
+
+# --- v4 pipeline (lyrics: Whisper + Qwen + MarianMT + e5) -------------------
+# torch on aarch64 from PyPI is CPU-only. For CUDA-accelerated Whisper/Qwen on
+# Jetson, swap these for the matching cu126 wheels from pypi.jetson-ai-lab.io.
+torch==2.6.0
+torchaudio==2.6.0
+openai-whisper==20250625
+silero-vad==5.1.2
+llama-cpp-python==0.3.21
+qwen-asr==0.0.6
+langdetect==1.0.9
+stopwords==1.0.2
+# ---------------------------------------------------------------------------
+
+PyJWT==2.12.1
+argon2-cffi==25.1.0
 gunicorn
 zstandard
