@@ -132,7 +132,7 @@ RUN set -ux; \
             libpq-dev postgresql-client \
             ffmpeg wget curl \
             supervisor procps \
-            gcc g++ \
+            gcc g++ cmake ninja-build \
             git vim redis-tools strace iputils-ping \
             libcudnn9-cuda-12 \
             ; then \
