@@ -34,9 +34,9 @@ services:
     environment:
       SERVICE_TYPE: "flask"
       MEDIASERVER_TYPE: "jellyfin"
-      JELLYFIN_URL: "http://192.168.8.214:8096"  # NucBox K9 IP
-      JELLYFIN_USER_ID: "6942f33d18724060bc118d8962662d64"
-      JELLYFIN_TOKEN: "e7d8461843be46aa9bffb5e419953d7b"
+      JELLYFIN_URL: "http://192.168.8.128:8096"  # NucBox K9 IP
+      JELLYFIN_USER_ID: "7f2c512d00a44f3f8ef7d14a539e27ca"
+      JELLYFIN_TOKEN: "3736b647033147fabbdfa44238989b67"
 #      MEDIASERVER_TYPE: "navidrome"
 #      NAVIDROME_URL: "http://192.168.0.214:4533" #for example http://192.168.3.13:4533/
 #      NAVIDROME_USER: "suranjan"
@@ -63,9 +63,9 @@ services:
     environment:
       SERVICE_TYPE: "worker"
       MEDIASERVER_TYPE: "jellyfin"
-      JELLYFIN_URL: "http://192.168.8.214:8096"  # NucBox K9 IP
-      JELLYFIN_USER_ID: "6942f33d18724060bc118d8962662d64"
-      JELLYFIN_TOKEN: "e7d8461843be46aa9bffb5e419953d7b"
+      JELLYFIN_URL: "http://192.168.8.128:8096"  # NucBox K9 IP
+      JELLYFIN_USER_ID: "7f2c512d00a44f3f8ef7d14a539e27ca"
+      JELLYFIN_TOKEN: "3736b647033147fabbdfa44238989b67"
 #      MEDIASERVER_TYPE: "navidrome"
 #      NAVIDROME_URL: "http://192.168.0.214:4533" #for example http://192.168.3.13:4533/
 #      NAVIDROME_USER: "suranjan"
@@ -89,10 +89,10 @@ services:
       ORT_DISABLE_AVX512: "0"
       ORT_FORCE_SHARED_PROVIDER: "0"
       ORT_DISABLE_MEMORY_PATTERN_OPTIMIZATION: "0"
-      # Orin Nano 8GB unified RAM: GPU OOM when default+high workers run simultaneously.
-      # Force CPU to avoid cuBLAS/cuDNN alloc failures.
-      MUSICNN_FORCE_CPU: "1"
-      CLAP_FORCE_CPU: "1"
+      # GPU mode: both MusiCNN and CLAP on GPU
+      # If OOM/cuBLAS errors reappear, set MUSICNN_FORCE_CPU=1 and/or CLAP_FORCE_CPU=1
+      # MUSICNN_FORCE_CPU: "1"
+      # CLAP_FORCE_CPU: "1"
     volumes:
       - temp-audio-worker:/app/temp_audio
       - /usr/lib/aarch64-linux-gnu/nvidia/:/usr/lib/aarch64-linux-gnu/nvidia/

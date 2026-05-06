@@ -1104,8 +1104,11 @@ def run_analysis_task(num_recent_albums, top_n_moods):
                 """
                 nonlocal albums_completed, last_rebuild_count
                 removed = 0
+                logger.info(f"[Monitor] Checking {len(active_jobs)} active jobs, albums_completed={albums_completed}")
 
                 # First: try to detect terminal jobs via RQ
+                active_in_launched = sum(1 for k in active_jobs if k in launched_job_ids)
+                logger.info(f"[Monitor] active_jobs={len(active_jobs)}, in_launched={active_in_launched}/{len(launched_job_ids)}, overlap={set(list(active_jobs.keys())[:3]) & launched_job_ids}")
                 for job_id in list(active_jobs.keys()):
                     # CRITICAL: Remove jobs that aren't in launched_job_ids (zombie jobs from previous runs)
                     if job_id not in launched_job_ids:
@@ -1142,6 +1145,7 @@ def run_analysis_task(num_recent_albums, top_n_moods):
                                       if t.get('status') in terminal_statuses 
                                       and t.get('task_id') in launched_job_ids)
 
+                    logger.info(f"[Monitor] DB reconciliation: db_completed={db_completed}, albums_completed={albums_completed}, child_tasks_count={len(child_tasks)}, launched_job_ids_count={len(launched_job_ids)}")
                     if db_completed != albums_completed:
                         logger.info(f"Reconciling albums_completed: RQ_count={albums_completed} DB_count={db_completed} (from {len(launched_job_ids)} launched jobs)")
                         albums_completed = db_completed
@@ -1280,8 +1284,12 @@ def run_analysis_task(num_recent_albums, top_n_moods):
             if albums_launched == 0 and albums_skipped == total_albums_to_check:
                 logger.warning(f"No albums were enqueued: all {total_albums_to_check} albums were skipped (no tracks or already analyzed). If unexpected, try running with num_recent_albums=0 to fetch more or inspect the media server responses and Spotify filtering.")
 
+            logger.info(f"[MainAnalysisTask] Entering monitor loop. active_jobs={len(active_jobs)}, launched_job_ids={len(launched_job_ids)}")
             while active_jobs:
-                monitor_and_clear_jobs()
+                try:
+                    monitor_and_clear_jobs()
+                except Exception as e:
+                    logger.error(f"[MainAnalysisTask] monitor_and_clear_jobs() crashed: {e}", exc_info=True)
                 progress = 5 + int(85 * ((albums_skipped + albums_completed) / float(total_albums_to_check)))
                 status_message = f"Launched: {albums_launched}. Completed: {albums_completed}/{albums_launched}. Active: {len(active_jobs)}. Skipped: {albums_skipped}/{total_albums_to_check}. (Finalizing)"
                 log_and_update_main(status_message, progress, checked_album_ids=list(checked_album_ids))

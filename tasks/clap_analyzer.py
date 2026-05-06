@@ -32,6 +32,9 @@ except Exception:
     AUDIO_LOAD_TIMEOUT = None
 from tasks.memory_utils import cleanup_cuda_memory, handle_onnx_memory_error, comprehensive_memory_cleanup
 
+import onnxruntime as _ort
+_ort.set_default_logger_severity(3)  # suppress C++ warnings (Conv fallback, etc.)
+
 logger = logging.getLogger(__name__)
 
 # Global ONNX sessions (lazy loaded)
