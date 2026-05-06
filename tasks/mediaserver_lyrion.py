@@ -3,7 +3,10 @@
 import requests
 import logging
 import os
+from urllib.parse import unquote, urlparse
 import config
+
+from tasks.mediaserver_helper import detect_path_format
 
 logger = logging.getLogger(__name__)
 
@@ -12,6 +15,84 @@ REQUESTS_TIMEOUT = 300
 # Custom exception for Lyrion API failures so callers can decide how to handle them
 class LyrionAPIError(Exception):
     pass
+
+def _decode_lyrion_url(url):
+    """Decode Lyrion file:// URI to a plain filesystem path."""
+    if not url:
+        return None
+    if url.startswith('file://'):
+        return unquote(urlparse(url).path)
+    return unquote(url)
+
+
+def _lyrion_is_spotify(item):
+    """Detect Spotify/stream-only tracks in Lyrion sample data."""
+    if not isinstance(item, dict):
+        return False
+    url = item.get('url') or item.get('path') or ''
+    if isinstance(url, str) and url.startswith('spotify:'):
+        return True
+    genre = item.get('genre') or item.get('type') or ''
+    return isinstance(genre, str) and genre.lower() == 'spotify'
+
+
+def _lyrion_track(item):
+    """Normalize a raw Lyrion title entry into the sample track shape."""
+    if not isinstance(item, dict):
+        return {
+            'id': None,
+            'path': None,
+            'title': None,
+            'artist': None,
+            'album_artist': None,
+            'album': None,
+            'year': None,
+            'track_number': None,
+            'disc_number': None,
+        }
+
+    def _try(*keys):
+        for key in keys:
+            value = item.get(key)
+            if value is not None:
+                return value
+        return None
+
+    year = _try('year', 'Year')
+    if isinstance(year, str):
+        try:
+            year = int(year)
+        except (TypeError, ValueError):
+            year = None
+
+    return {
+        'id': _try('id', 'track_id'),
+        'path': _try('url', 'path'),
+        'title': _try('title', 'name'),
+        'artist': _try('artist', 'albumartist'),
+        'album_artist': _try('albumartist', 'artist'),
+        'album': _try('album', 'title'),
+        'year': year,
+        'track_number': _try('track', 'index', 'trackNumber'),
+        'disc_number': _try('disc', 'disc_number', 'parentIndexNumber'),
+    }
+
+
+def _lyrion_titles_response(response):
+    """Normalize Lyrion JSON-RPC titles results into a list of title dicts."""
+    if not response:
+        return []
+    if isinstance(response, dict):
+        titles = response.get('titles_loop')
+        if isinstance(titles, list):
+            return titles
+        for value in response.values():
+            if isinstance(value, list):
+                return value
+        return []
+    if isinstance(response, list):
+        return response
+    return []
 
 # ##############################################################################
 # LYRION (JSON-RPC) IMPLEMENTATION
@@ -227,6 +308,60 @@ def _get_target_music_folder_ids():
     logger.info(f"DEBUG: Returning folder IDs: {music_folder_ids}")
     return music_folder_ids
 
+def list_libraries(user_creds=None):
+    """List all music folders exposed by a Lyrion (LMS) server.
+
+    Unlike `_get_target_music_folder_ids()`, this does NOT read
+    `config.MUSIC_LIBRARIES` and does NOT filter. Uses the ``musicfolder``
+    JSON-RPC command. ``_jsonrpc_request`` already forwards ``user_creds``.
+
+    The persisted ``name`` is the folder's filesystem **path** when the
+    server reports one, otherwise the folder's display name. Lyrion's
+    scan-time filter (``_get_target_paths_for_filtering``) treats
+    ``MUSIC_LIBRARIES`` as paths and substring-matches them against album
+    file URLs — so the UI must persist a value the filter can match
+    against. A bare folder name like ``Library_A`` works when the file
+    paths under that folder contain it (the typical Lyrion setup).
+
+    Notes on the Lyrion CLI:
+      * The command is ``musicfolder`` (singular). Some legacy docs and
+        wrappers use ``musicfolders`` (plural); on Lyrion 9.0.x that
+        variant drops the connection without responding.
+      * Folder entries report the display name under ``filename`` on
+        9.0.x (not ``name``/``folder``), so we accept all three.
+    """
+    response = _jsonrpc_request("musicfolder", [0, 999999], user_creds=user_creds)
+    if not response:
+        return []
+
+    all_folders = []
+    if isinstance(response, dict):
+        if "folder_loop" in response:
+            all_folders = response["folder_loop"]
+        elif "folders_loop" in response:
+            all_folders = response["folders_loop"]
+        else:
+            for v in response.values():
+                if isinstance(v, list):
+                    all_folders = v
+                    break
+    elif isinstance(response, list):
+        all_folders = response
+
+    libraries = []
+    for folder in all_folders or []:
+        if not isinstance(folder, dict):
+            continue
+        folder_id = folder.get('id') or folder.get('folder_id')
+        folder_name = folder.get('filename') or folder.get('name') or folder.get('folder')
+        folder_path = folder.get('path') or folder.get('url')
+        if folder_id is None or not folder_name:
+            continue
+        display_name = folder_path or folder_name
+        libraries.append({'id': str(folder_id), 'name': display_name})
+    return libraries
+
+
 def _get_first_player():
     """Gets the first available player from Lyrion for web interface operations."""
     try:
@@ -245,17 +380,25 @@ def _get_first_player():
         logger.error(f"Error getting Lyrion player: {e}")
         return "10.42.6.0"  # Use the player from your example as fallback
 
-def _jsonrpc_request(method, params, player_id=""):
+def _jsonrpc_request(method, params, player_id="", user_creds=None, timeout=None):
     """
-    Helper to make a JSON-RPC request to the Lyrion server without authentication.
+    Helper to make a JSON-RPC request to the Lyrion server, optionally using override creds.
     Returns the 'result' field on success, or None on failure.
+    ``timeout`` overrides the default REQUESTS_TIMEOUT for time-sensitive calls.
     """
-    url = f"{config.LYRION_URL}/jsonrpc.js"
+    base_url = (user_creds.get('url') if user_creds and user_creds.get('url') else config.LYRION_URL).rstrip('/')
+    url = f"{base_url}/jsonrpc.js"
     payload = {
         "id": 1,
         "method": "slim.request",
         "params": [player_id, [method, *params]]
     }
+    auth = None
+    if user_creds:
+        user = user_creds.get('user')
+        password = user_creds.get('password')
+        if user or password:
+            auth = (user or '', password or '')
 
     # Try with retry logic for connection issues. Use the configured REQUESTS_TIMEOUT
     max_retries = 3
@@ -264,7 +407,7 @@ def _jsonrpc_request(method, params, player_id=""):
             with requests.Session() as s:
                 s.headers.update({"Content-Type": "application/json"})
                 # Use configured timeout so slow servers can be handled
-                r = s.post(url, json=payload, timeout=REQUESTS_TIMEOUT)
+                r = s.post(url, json=payload, timeout=timeout or REQUESTS_TIMEOUT, auth=auth)
 
             r.raise_for_status()
             response_data = r.json()
@@ -707,7 +850,7 @@ def get_recent_albums(limit):
     logger.info(f"Found {len(filtered_albums)} albums in configured folders (pages fetched: {pages_fetched}, albums scanned: {albums_scanned}, matched: {albums_matched}, filtered_no_path: {filtered_no_path}, filtered_no_album_id: {filtered_no_album_id})")
     return filtered_albums
 
-def get_all_songs():
+def get_all_songs(user_creds=None):
     """
     Fetches all songs from Lyrion using JSON-RPC.
     For now, just gets all songs since folder filtering is complex in Lyrion.
@@ -719,7 +862,7 @@ def get_all_songs():
     
     # Fetch all songs without filtering
     logger.info("Fetching all songs from Lyrion")
-    response = _jsonrpc_request("titles", [0, 999999])
+    response = _jsonrpc_request("titles", [0, 999999, "tags:galduAyR"], user_creds=user_creds)
     
     all_songs = []
     if response and "titles_loop" in response:
@@ -748,17 +891,86 @@ def get_all_songs():
                 used_field = 'fallback'
             
             mapped_song = {
-                'Id': song.get('id'), 
-                'Name': song.get('title'), 
-                'AlbumArtist': track_artist, 
-                'Path': song.get('url'), 
-                'url': song.get('url')
+                'Id': song.get('id'),
+                'Name': song.get('title'),
+                'AlbumArtist': track_artist,
+                'OriginalAlbumArtist': song.get('albumartist'),
+                'Album': song.get('album'),
+                'Path': song.get('url'),
+                'url': song.get('url'),
+                'Year': int(song.get('year')) if song.get('year') else None,
+                'Rating': int(int(song.get('rating')) / 20) if song.get('rating') else None,
+                'FilePath': _decode_lyrion_url(song.get('url')),
             }
             all_songs.append(mapped_song)
-        
+
         logger.info(f"Found {len(songs)} total songs")
 
     return all_songs
+
+
+def search_albums(query, user_creds=None):
+    """Search Lyrion albums using admin or override credentials."""
+    body = _jsonrpc_request("albums", [0, 10, f"search:{query}", "tags:lyja"], user_creds=user_creds)
+    if not body:
+        return []
+    albums = []
+    if isinstance(body, dict):
+        albums = body.get('albums_loop') or []
+    elif isinstance(body, list):
+        albums = body
+    out = []
+    for a in albums:
+        year = a.get('year')
+        if not isinstance(year, int):
+            try:
+                year = int(year) if year not in (None, '') else None
+            except (TypeError, ValueError):
+                year = None
+        out.append({
+            'id':          str(a.get('id', '')) or None,
+            'name':        a.get('album') or a.get('title'),
+            'artist':      a.get('artist') or a.get('albumartist'),
+            'year':        year,
+            'track_count': a.get('tracks') or a.get('count'),
+        })
+    return out
+
+
+def test_connection(user_creds=None):
+    """Test Lyrion connectivity using admin or override credentials."""
+    warnings = []
+    body = _jsonrpc_request("titles", [0, 100, "tags:galduAyR"], user_creds=user_creds)
+    if body is None:
+        return {'ok': False, 'error': 'Lyrion test_connection failed', 'sample_count': 0, 'path_format': 'none', 'warnings': []}
+
+    raws = _lyrion_titles_response(body)
+    if not raws:
+        # Fallback to a simpler call if the tagged query returns no tracks.
+        body = _jsonrpc_request("titles", [0, 100], user_creds=user_creds)
+        raws = _lyrion_titles_response(body)
+
+    sample = []
+    for r in raws:
+        if _lyrion_is_spotify(r):
+            continue
+        sample.append(_lyrion_track(r))
+
+    path_format = detect_path_format(sample)
+    if path_format != 'absolute':
+        warnings.append(
+            'Lyrion is returning relative paths, stream URIs, or no paths at all. '
+            'Automatic path-based matching may be unreliable for this library. '
+            'Expect to manually match most albums in Step 4.'
+        )
+    return {
+        'ok': True,
+        'error': None,
+        'sample_count': len(sample),
+        'path_format': path_format,
+        'warnings': warnings,
+    }
+
 
 def _add_to_playlist(playlist_id, item_ids):
     """Adds songs to a Lyrion playlist using the working player-based method."""
@@ -931,7 +1143,7 @@ def delete_playlist(playlist_id):
     return False
 
 # --- User-specific Lyrion functions ---
-def get_tracks_from_album(album_id):
+def get_tracks_from_album(album_id, user_creds=None):
     """Fetches all audio tracks for an album from Lyrion using JSON-RPC."""
     logger.info(f"Attempting to fetch tracks for album ID: {album_id}")
     
@@ -939,7 +1151,7 @@ def get_tracks_from_album(album_id):
     # The 'titles' command with a filter is the correct way to get songs for an album.
     # We now fetch all songs and filter them by the album ID.
     try:
-        response = _jsonrpc_request("titles", [0, 999999, f"album_id:{album_id}", "tags:galdu"])
+        response = _jsonrpc_request("titles", [0, 999999, f"album_id:{album_id}", "tags:galduAyR"], user_creds=user_creds)
         logger.debug(f"Lyrion API Raw Track Response for Album {album_id}: {response}")
     except Exception as e:
         logger.error(f"Lyrion API call for album {album_id} failed: {e}", exc_info=True)
@@ -1031,7 +1243,14 @@ def get_tracks_from_album(album_id):
             used_field = 'fallback'
         
         path = s.get('url') or s.get('Path') or s.get('path') or ''
-        mapped.append({'Id': id_val, 'Name': title, 'AlbumArtist': artist, 'Path': path, 'url': path})
+        mapped.append({
+            'Id': id_val, 'Name': title, 'AlbumArtist': artist, 'OriginalAlbumArtist': s.get('albumartist'),
+            'Album': s.get('album'),
+            'Path': path, 'url': path,
+            'Year': int(s.get('year')) if s.get('year') else None,
+            'Rating': int(int(s.get('rating')) / 20) if s.get('rating') else None,
+            'FilePath': _decode_lyrion_url(s.get('url')),
+        })
 
     return mapped
 
@@ -1046,7 +1265,7 @@ def get_playlist_by_name(playlist_name):
 
 def get_top_played_songs(limit):
     """Fetches the top N most played songs from Lyrion for a specific user using JSON-RPC."""
-    response = _jsonrpc_request("titles", [0, limit, "sort:popular"])
+    response = _jsonrpc_request("titles", [0, limit, "sort:popular", "tags:galduAyR"])
     if response and "titles_loop" in response:
         songs = response["titles_loop"]
         # Map Lyrion API keys to our standard format.
@@ -1075,11 +1294,16 @@ def get_top_played_songs(limit):
                 used_field = 'fallback'
             
             mapped_songs.append({
-                'Id': s.get('id'), 
-                'Name': title, 
-                'AlbumArtist': track_artist, 
-                'Path': s.get('url'), 
-                'url': s.get('url')
+                'Id': s.get('id'),
+                'Name': title,
+                'AlbumArtist': track_artist,
+                'OriginalAlbumArtist': s.get('albumartist'),
+                'Album': s.get('album'),
+                'Path': s.get('url'),
+                'url': s.get('url'),
+                'Year': int(s.get('year')) if s.get('year') else None,
+                'Rating': int(int(s.get('rating')) / 20) if s.get('rating') else None,
+                'FilePath': _decode_lyrion_url(s.get('url')),
             })
         return mapped_songs
     return []
@@ -1089,6 +1313,28 @@ def get_last_played_time(item_id):
     """Fetches the last played time for a track for a specific user. Not supported by Lyrion JSON-RPC API."""
     logger.warning("Lyrion's JSON-RPC API does not provide a 'last played time' for individual tracks.")
     return None
+
+def get_lyrics(track_id: str, timeout: float = 2.5):
+    """Fetch embedded lyrics from Lyrion (LMS) for a given track ID.
+
+    Uses the LMS JSON-RPC ``songinfo`` command with the ``l`` (lyrics) tag.
+    Returns plain text or None.
+    """
+    try:
+        result = _jsonrpc_request(
+            'songinfo', [0, 100, f'track_id:{track_id}', 'tags:l'],
+            timeout=timeout,
+        )
+        if not result:
+            return None
+        for entry in result.get('songinfo_loop', []):
+            lyrics = entry.get('lyrics') or entry.get('Lyrics')
+            if lyrics:
+                return str(lyrics).strip() or None
+        return None
+    except Exception as exc:
+        logger.debug('Lyrion get_lyrics failed for %s: %s', track_id, exc)
+        return None
 
 def create_instant_playlist(playlist_name, item_ids):
     """Creates a new instant playlist on Lyrion for a specific user, with batching."""

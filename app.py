@@ -1,18 +1,17 @@
 import os
 import psycopg2
 from psycopg2.extras import DictCursor
-from flask import Flask, jsonify, request, render_template, g, make_response, redirect, url_for
+from flask import Flask, jsonify, request, render_template, g
 import json
 import logging
 import threading
 import time
-import datetime
-import secrets
-import jwt as pyjwt
+import config
 
 # RQ imports
 from rq.job import Job, JobStatus
 from rq.exceptions import NoSuchJobError
+from tasks.setup_manager import SetupManager
 
 # Redis client
 from redis import Redis
@@ -34,7 +33,7 @@ from config import JELLYFIN_URL, JELLYFIN_USER_ID, JELLYFIN_TOKEN, HEADERS, TEMP
   TOP_N_PLAYLISTS, PATH_DISTANCE_METRIC, ALCHEMY_DEFAULT_N_RESULTS, ALCHEMY_MAX_N_RESULTS, ALCHEMY_SUBTRACT_DISTANCE, \
   ENABLE_PROXY_FIX, \
   ALCHEMY_SUBTRACT_DISTANCE_ANGULAR, ALCHEMY_SUBTRACT_DISTANCE_EUCLIDEAN, \
-  AUDIOMUSE_USER, AUDIOMUSE_PASSWORD, API_TOKEN, JWT_SECRET
+  API_TOKEN, JWT_SECRET, AUTH_ENABLED
 
 if ENABLE_PROXY_FIX:
   # Werkzeug import for reverse proxy support
@@ -42,6 +41,7 @@ if ENABLE_PROXY_FIX:
 
 # --- Flask App Setup ---
 app = Flask(__name__)
+setup_manager = SetupManager()
 
 # Import helper functions
 from app_helper import (
@@ -54,6 +54,14 @@ from app_helper import (
     TASK_STATUS_PENDING, TASK_STATUS_STARTED, TASK_STATUS_PROGRESS,
     TASK_STATUS_SUCCESS, TASK_STATUS_FAILURE, TASK_STATUS_REVOKED
 )
+from app_auth import (
+    init_app as init_auth,
+    check_setup_needed,
+    seed_admin_from_env,
+    resolve_jwt_secret,
+)
+
+from app_provider_migration import migration_bp
 
 # NOTE: Annoy Manager import is moved to be local where used to prevent circular imports.
 
@@ -73,70 +81,48 @@ if ENABLE_PROXY_FIX:
 app.logger.info(f"Starting AudioMuse-AI Backend version {APP_VERSION}")
 
 # --- Authentication Setup ---
-AUTH_ENABLED = bool(AUDIOMUSE_USER and AUDIOMUSE_PASSWORD and API_TOKEN)
-
-# Finalize JWT_SECRET — auto-generate if not configured
+# All auth logic (user accounts, password hashing, JWT, /login /auth /logout
+# /api/users routes, and the setup/auth/admin barrier) lives in app_auth.
+# The JWT secret is resolved after DB init (see below) so every gunicorn
+# worker ends up sharing the same value.
 _jwt_secret = JWT_SECRET
-if not _jwt_secret and AUTH_ENABLED:
-    _jwt_secret = secrets.token_hex(32)
-    app.logger.warning(
-        "JWT_SECRET is not set. A random secret has been generated. "
-        "All browser sessions will be invalidated on container restart. "
-        "Set JWT_SECRET in your .env for persistent sessions."
-    )
 
-# --- Context Processor to Inject Version and Feature Flags ---
+def _get_jwt_secret():
+    return _jwt_secret
+
 @app.context_processor
 def inject_globals():
     """Injects global variables into all templates."""
-    from config import CLAP_ENABLED, MULAN_ENABLED
+    from config import CLAP_ENABLED, MULAN_ENABLED, LYRICS_ENABLED
+    # auth_role defaults to 'admin' (set by check_auth_needed), so when
+    # AUTH_ENABLED is false or the barrier has not run yet (e.g. error
+    # pages), is_admin will be True and the full UI is shown.
+    auth_role = getattr(g, 'auth_role', 'admin')
+    current_user = getattr(g, 'auth_user', None)
     return dict(
         app_version=APP_VERSION,
         clap_enabled=CLAP_ENABLED,
         mulan_enabled=MULAN_ENABLED,
-        auth_enabled=AUTH_ENABLED,
+        lyrics_enabled=LYRICS_ENABLED,
+        auth_enabled=config.AUTH_ENABLED,
+        setup_saved=not check_setup_needed(),
+        is_admin=(auth_role == 'admin'),
+        current_user=current_user,
     )
 
-# --- Authentication Middleware ---
+# Register the auth barrier + auth routes (/login, /auth, /logout, /api/users).
+init_auth(app, setup_manager, _get_jwt_secret)
+
 @app.before_request
-def check_auth():
-    """
-    Enforce authentication on all routes when auth is enabled.
-    Skipped entirely when AUTH_ENABLED is False (legacy mode).
-    Accepts:
-      - Valid JWT in HttpOnly cookie  (browser sessions)
-      - Valid API_TOKEN Bearer header (M2M / scripts)
-    Public routes: /login, /auth, /logout, /static/*
-    """
-    if not AUTH_ENABLED:
-        return  # Auth disabled — zero impact on existing deployments
+def log_api_request():
+    if request.path.startswith('/api/') and not request.path.startswith('/static/'):
+        app.logger.info('API request: %s %s', request.method, request.path)
 
-    # Always allow public routes
-    public = ('/login', '/auth', '/logout')
-    if request.path in public or request.path.startswith('/static/'):
-        return
-
-    # Check 1: valid JWT cookie (browser users)
-    token = request.cookies.get('audiomuse_jwt')
-    if token:
-        try:
-            pyjwt.decode(token, _jwt_secret, algorithms=['HS256'])
-            return  # Valid session
-        except pyjwt.ExpiredSignatureError:
-            pass  # Fall through to 401/redirect
-        except pyjwt.InvalidTokenError:
-            pass  # Fall through to 401/redirect
-
-    # Check 2: valid Bearer token (M2M callers)
-    auth_header = request.headers.get('Authorization', '')
-    if auth_header.startswith('Bearer ') and auth_header[7:] == API_TOKEN:
-        return  # Valid M2M token
-
-    # Not authenticated
-    if request.path.startswith('/api/'):
-        return jsonify({"error": "Unauthorized"}), 401
-    else:
-        return redirect(url_for('login_page'))
+@app.route('/api/health')
+def health_check():
+    return jsonify({
+        'status': 'ok',
+    })
 
 # --- Swagger Setup ---
 app.config['SWAGGER'] = {
@@ -152,78 +138,40 @@ def teardown_db(e=None):
 
 # Initialize the database schema when the application module is loaded.
 # This is safe because it doesn't import other application modules.
-with app.app_context():
-    init_db()
+# RQ workers import app.py too, but they should not perform schema bootstrapping.
+_is_worker = os.environ.get('AUDIOMUSE_ROLE') == 'worker'
+if not _is_worker:
+    with app.app_context():
+        init_db()
+        setup_manager.bootstrap_env_config_if_empty(config)
+        # Bootstrap / reconcile the first admin account:
+        #   - If audiomuse_users already has an admin, purge any legacy
+        #     AUDIOMUSE_USER / AUDIOMUSE_PASSWORD rows from app_config.
+        #   - Else if app_config contains legacy admin values, import them into
+        #     audiomuse_users and remove the legacy config.
+        #   - Else if env vars contain legacy admin values, import them into
+        #     audiomuse_users.
+        # See app_auth.seed_admin_from_env for full precedence.
+        try:
+            seed_admin_from_env()
+        except Exception as _seed_exc:
+            app.logger.warning("seed_admin_from_env failed at startup: %s", _seed_exc)
 
+        # Finalize JWT_SECRET - must happen after DB init so the value can be
+        # persisted and shared across all gunicorn workers.
+        _jwt_secret = resolve_jwt_secret(setup_manager)
+else:
+    app.logger.info("RQ worker mode: skipping startup database schema bootstrap.")
+
+import app_setup
 
 # --- API Endpoints ---
 
-# --- Auth Routes ---
-@app.route('/login')
-def login_page():
-    """Serve the login page. Redirects to / if already authenticated."""
-    if not AUTH_ENABLED:
-        return redirect(url_for('index'))
-    token = request.cookies.get('audiomuse_jwt')
-    if token:
-        try:
-            pyjwt.decode(token, _jwt_secret, algorithms=['HS256'])
-            return redirect(url_for('index'))
-        except pyjwt.InvalidTokenError:
-            pass
-    return render_template('login.html', title='Login — AudioMuse-AI')
-
-@app.route('/auth', methods=['POST'])
-def auth_endpoint():
-    """
-    Validate credentials and issue a JWT session cookie.
-    Body: { "user": "...", "password": "..." }
-    On success: sets HttpOnly JWT cookie, returns 200.
-    On failure: returns 401.
-    The API_TOKEN is NEVER returned in the response body.
-    """
-    if not AUTH_ENABLED:
-        return jsonify({"error": "Auth not configured"}), 404
-
-    data = request.get_json(silent=True) or {}
-    user = data.get('user', '')
-    password = data.get('password', '')
-
-    if user != AUDIOMUSE_USER or password != AUDIOMUSE_PASSWORD:
-        app.logger.warning(f"Failed login attempt for user: {user!r}")
-        return jsonify({"error": "Invalid credentials"}), 401
-
-    # Issue JWT — new token at every login
-    now = datetime.datetime.now(datetime.timezone.utc)
-    payload = {
-        'sub': user,
-        'iat': now,
-        'exp': now + datetime.timedelta(hours=8),
-    }
-    token = pyjwt.encode(payload, _jwt_secret, algorithm='HS256')
-
-    resp = make_response(jsonify({"status": "ok"}), 200)
-    resp.set_cookie(
-        'audiomuse_jwt',
-        token,
-        httponly=True,           # JS cannot read this cookie
-        samesite='Strict',       # CSRF protection
-        secure=False,            # Set to True when behind HTTPS (Caddy/Traefik handle TLS)
-        max_age=8 * 3600         # 8 hours, matches JWT expiry
-    )
-    return resp
-
-@app.route('/logout', methods=['POST'])
-def logout_endpoint():
-    """Clear the JWT session cookie and redirect to /login."""
-    resp = make_response(jsonify({"status": "logged_out"}), 200)
-    resp.delete_cookie('audiomuse_jwt', samesite='Strict')
-    return resp
-
-@app.route('/')
+@app.route('/analysis')
 def index():
     """
-    Serve the main HTML page.
+    Serve the Analysis & Clustering page (legacy home).
+    The application landing page is now the dashboard ('/').
     ---
     tags:
       - UI
@@ -624,7 +572,6 @@ def listen_for_index_reloads():
   """
   # Create a new Redis connection for this thread.
   # Sharing the main redis_conn object across threads is not recommended.
-  from redis import Redis
   thread_redis_conn = Redis.from_url(
     REDIS_URL,
     socket_connect_timeout=30,
@@ -667,8 +614,30 @@ def listen_for_index_reloads():
             logger.info("Reloading MuLan embedding cache...")
             from tasks.mulan_text_search import refresh_mulan_cache
             mulan_success = refresh_mulan_cache()
-            
-            logger.info(f"In-memory reload complete: Voyager ✓, Artist ✓, Maps ✓, CLAP {'✓' if clap_success else '✗'}, MuLan {'✓' if mulan_success else '✗'}")
+
+            # Reload Lyrics cache (voyager index + axis matrix)
+            try:
+              from config import LYRICS_ENABLED
+              if LYRICS_ENABLED:
+                logger.info("Reloading Lyrics search cache...")
+                from tasks.lyrics_manager import refresh_lyrics_cache
+                lyrics_success = refresh_lyrics_cache()
+              else:
+                lyrics_success = False
+            except Exception as e:
+              logger.warning(f"Lyrics cache reload failed: {e}")
+              lyrics_success = False
+
+            # Reload SemGrove merged lyrics+audio index
+            try:
+              logger.info("Reloading SemGrove merged index...")
+              from tasks.sem_grove_manager import refresh_sem_grove_cache
+              sg_success = refresh_sem_grove_cache()
+            except Exception as e:
+              logger.warning(f"SemGrove cache reload failed: {e}")
+              sg_success = False
+
+            logger.info(f"In-memory reload complete: Voyager ✓, Artist ✓, Maps ✓, CLAP {'✓' if clap_success else '✗'}, MuLan {'✓' if mulan_success else '✗'}, Lyrics {'✓' if lyrics_success else '✗'}, SemGrove {'✓' if sg_success else '✗'}")
           except Exception as e:
             logger.error(f"Error reloading indexes/maps from background listener: {e}", exc_info=True)
       elif message_data == 'reload-artist':
@@ -710,6 +679,11 @@ from app_waveform import waveform_bp
 from app_artist_similarity import artist_similarity_bp
 from app_clap_search import clap_search_bp
 from app_mulan_search import mulan_search_bp
+from app_lyrics import lyrics_search_bp
+from app_sem_grove import sem_grove_bp
+from app_backup import backup_bp
+from app_dashboard import dashboard_bp
+from app_users import users_bp
 
 app.register_blueprint(chat_bp, url_prefix='/chat')
 app.register_blueprint(clustering_bp)
@@ -726,12 +700,15 @@ app.register_blueprint(waveform_bp)
 app.register_blueprint(artist_similarity_bp)
 app.register_blueprint(clap_search_bp)
 app.register_blueprint(mulan_search_bp)
+app.register_blueprint(lyrics_search_bp)
+app.register_blueprint(sem_grove_bp)
+app.register_blueprint(backup_bp)
+app.register_blueprint(migration_bp)
+app.register_blueprint(dashboard_bp)
+app.register_blueprint(users_bp)
 
 # --- Startup: Load indexes and caches (Flask server only, NOT RQ workers) ---
 # RQ workers import app.py but should NOT load indexes or start background threads.
-# The env var AUDIOMUSE_ROLE is set to 'worker' by rq_worker.py / rq_worker_high_priority.py.
-_is_worker = os.environ.get('AUDIOMUSE_ROLE') == 'worker'
-
 try:
   os.makedirs(TEMP_DIR, exist_ok=True)
 except OSError:
@@ -801,6 +778,26 @@ if not _is_worker:
           logger.info("No MuLan queries found in database (defaults inserted)")
     except Exception as e:
       logger.debug(f"MuLan cache not loaded at startup (may be disabled or failed): {e}")
+    # Load Lyrics search cache (voyager index over per-song e5 embeddings + axis-score matrix)
+    try:
+      from config import LYRICS_ENABLED
+      if LYRICS_ENABLED:
+        from tasks.lyrics_manager import load_lyrics_cache_from_db
+        if load_lyrics_cache_from_db():
+          logger.info("Lyrics search cache loaded at startup (voyager index + axis matrix).")
+        else:
+          logger.info("Lyrics search cache empty at startup (run analysis to populate).")
+    except Exception as e:
+      logger.debug(f"Lyrics cache not loaded at startup (may be disabled or failed): {e}")
+    # Load SemGrove merged lyrics+audio index
+    try:
+      from tasks.sem_grove_manager import load_sem_grove_cache_from_db
+      if load_sem_grove_cache_from_db():
+        logger.info("SemGrove merged index loaded at startup.")
+      else:
+        logger.info("SemGrove index not found at startup (build it after analysis completes).")
+    except Exception as e:
+      logger.debug(f"SemGrove cache not loaded at startup: {e}")
 
     def _start_map_init_background():
       try:
@@ -836,8 +833,31 @@ if not _is_worker:
 
   cron_thread = threading.Thread(target=_cron_manager_loop, daemon=True)
   cron_thread.start()
+
+  # Dashboard stats refresher: runs once at startup, then hourly.
+  # Keeps heavy content/index aggregates off the request path.
+  def _dashboard_stats_refresher_loop():
+    try:
+      from time import sleep
+      from app_dashboard import refresh_dashboard_stats
+      # Wait a minute after startup so the initial DB/index warm-up and
+      # first incoming requests have time to settle before we kick off
+      # the heavy content/indexes scan.
+      sleep(60)
+      while True:
+        try:
+          refresh_dashboard_stats(app)
+        except Exception:
+          app.logger.exception('dashboard stats refresh failed')
+        sleep(3600)
+    except Exception:
+      app.logger.exception('dashboard stats refresher main loop error')
+
+  dashboard_stats_thread = threading.Thread(
+      target=_dashboard_stats_refresher_loop, daemon=True)
+  dashboard_stats_thread.start()
 else:
-  logger.info('Running as RQ worker — skipping index loading, Redis listener, and cron thread.')
+  logger.info('Running as RQ worker: skipping index loading, Redis listener, and cron thread.')
 
 if __name__ == '__main__':
   app.run(debug=False, host='0.0.0.0', port=8000)

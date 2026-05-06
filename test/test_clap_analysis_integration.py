@@ -14,6 +14,7 @@
 #       CLAP ONNX models:
 #         - DCLAP audio: model_epoch_36.onnx + model_epoch_36.onnx.data in test/models/
 #         - Text: clap_text_model.onnx in test/models/
+import os
 import sys
 import types
 from pathlib import Path
@@ -86,10 +87,19 @@ def test_clap_analysis_runs_and_shows_output():
     except Exception as e:
         pytest.skip(f"librosa not importable: {e}")
 
+    # Force Transformers into offline mode for this integration test.
+    os.environ.setdefault('TRANSFORMERS_OFFLINE', '1')
+    os.environ.setdefault('HF_HUB_OFFLINE', '1')
+    os.environ.setdefault('HF_DATASETS_OFFLINE', '1')
+
     # Ensure the project is importable and provide stubs
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
     _ensure_stubs()
+
+    # Validate that the required offline tokenizer exists. Failure here should fail the test.
+    from transformers import AutoTokenizer
+    AutoTokenizer.from_pretrained('roberta-base', local_files_only=True)
 
     # Override config before importing CLAP analyzer
     import config
@@ -149,8 +159,22 @@ def test_clap_analysis_runs_and_shows_output():
             all_passed = True
             
             for query in test_queries:
-                text_embedding = get_text_embedding(query)
-                
+                # try once, then retry once on failure
+                text_embedding = None
+                last_exc = None
+                for attempt in range(2):
+                    try:
+                        text_embedding = get_text_embedding(query)
+                        last_exc = None
+                        break
+                    except Exception as e:
+                        last_exc = e
+                        # small pause if second try will be attempted
+                        if attempt == 0:
+                            continue
+                if last_exc is not None:
+                    pytest.fail(f"CLAP text model unavailable after retry: {last_exc}")
+
                 if text_embedding is None:
                     print(f'  {query:25s} - Failed to compute text embedding')
                     pytest.fail(f'{track_name}: Failed to compute text embedding for query "{query}"')

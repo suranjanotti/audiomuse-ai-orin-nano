@@ -29,10 +29,40 @@ RUN set -ux; \
     done; \
     rm -rf /var/lib/apt/lists/*
 
-# Download ONNX models with diagnostics and retry logic
-# v4.0.0-model: Open-source MusiCNN models exported directly from the musicnn project
-# Mood-specific models removed (other features now computed via CLAP text embeddings)
+# Download the unified lyrics model bundle, then download ONNX models with diagnostics and retry logic.
 RUN set -eux; \
+    mkdir -p /app/model; \
+    lyrics_url="https://github.com/NeptuneHub/AudioMuse-AI/releases/download/v4.0.0-model/lyrics_model.tar.gz"; \
+    lyrics_dest="/tmp/lyrics_model.tar.gz"; \
+    n=0; \
+    until [ "$n" -ge 5 ]; do \
+        if wget --no-verbose --tries=3 --retry-connrefused --waitretry=5 \
+            --header="User-Agent: AudioMuse-Docker/1.0 (+https://github.com/NeptuneHub/AudioMuse-AI)" \
+            -O "$lyrics_dest" "$lyrics_url"; then \
+            echo "Downloaded lyrics model bundle -> $lyrics_dest"; \
+            break; \
+        fi; \
+        n=$((n+1)); \
+        echo "wget attempt $n for $lyrics_url failed — retrying in $((n*n))s"; \
+        sleep $((n*n)); \
+    done; \
+    if [ "$n" -ge 5 ]; then \
+        echo "ERROR: failed to download lyrics model bundle after 5 attempts"; \
+        ls -lah /app/model || true; \
+        exit 1; \
+    fi; \
+    echo "Extracting lyrics model bundle to /app/model..."; \
+    rm -rf /tmp/lyrics_unpack; \
+    mkdir -p /tmp/lyrics_unpack; \
+    tar -xzf "$lyrics_dest" -C /tmp/lyrics_unpack; \
+    if [ -d "/tmp/lyrics_unpack/lyrics_model" ]; then \
+        mv /tmp/lyrics_unpack/lyrics_model/* /app/model/; \
+        rm -rf /tmp/lyrics_unpack/lyrics_model; \
+    else \
+        mv /tmp/lyrics_unpack/* /app/model/; \
+    fi; \
+    rm -rf /tmp/lyrics_unpack; \
+    rm -f "$lyrics_dest"; \
     urls=( \
         "https://github.com/NeptuneHub/AudioMuse-AI/releases/download/v4.0.0-model/musicnn_embedding.onnx" \
         "https://github.com/NeptuneHub/AudioMuse-AI/releases/download/v4.0.0-model/musicnn_prediction.onnx" \
@@ -99,7 +129,7 @@ RUN set -ux; \
             libsndfile1-dev \
             libopenblas-dev \
             liblapack-dev \
-            libpq-dev \
+            libpq-dev postgresql-client \
             ffmpeg wget curl \
             supervisor procps \
             gcc g++ \
@@ -198,8 +228,12 @@ ENV LANG=C.UTF-8 \
     DEBIAN_FRONTEND=noninteractive \
     TZ=UTC \
     HF_HOME=/app/.cache/huggingface \
-    HF_HUB_OFFLINE=1 \
-    TRANSFORMERS_OFFLINE=1
+    HF_HUB_DISABLE_XET=1 \
+    HF_XET_DISABLE=1
+
+# Note: bundled HuggingFace models (e5, RoBERTa, MuLan, ...) load with
+# local_files_only=True per call. Marian translation models download on demand
+# at first use of a new source language; HF_HUB_OFFLINE is intentionally NOT set.
 
 WORKDIR /app
 
@@ -220,8 +254,8 @@ RUN ls -lah /app/.cache/huggingface/ && \
     echo "HuggingFace cache contents:" && \
     du -sh /app/.cache/huggingface/* || echo "Cache directory empty!"
 
-# Copy ONNX models from models stage (small files, no issues)
-COPY --from=models /app/model/*.onnx /app/model/
+# Copy all downloaded/extracted models from models stage
+COPY --from=models /app/model/ /app/model/
 
 # Download CLAP ONNX models directly in runner stage
 # - DCLAP audio model (~20MB + external data): Distilled student for music analysis in worker containers
@@ -370,7 +404,10 @@ RUN set -eux; \
 
 # Copy application code (last to maximize cache hits for code changes)
 COPY . /app
+COPY deployment/docker-entrypoint.sh /app/docker-entrypoint.sh
 COPY deployment/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+RUN chmod +x /app/docker-entrypoint.sh
+RUN ls -l /etc/supervisor/conf.d && test -f /etc/supervisor/conf.d/supervisord.conf
 
 # ============================================================================
 # CPU CONSISTENCY SETTINGS
@@ -404,9 +441,17 @@ ENV MKL_ENABLE_INSTRUCTIONS=AVX2 \
 # Prevent aggressive memory pre-allocation on newer CPUs
 ENV ORT_DISABLE_MEMORY_PATTERN_OPTIMIZATION=1
 
+# numba JIT cache must land in a writable directory.
+# When the container runs as a non-root user the system site-packages directory
+# (/usr/local/lib/python3.x/dist-packages/) is read-only, which causes librosa
+# to fail with: "cannot cache function: no locator available".
+# Point numba to /tmp so it always has write access (issue: NeptuneHub/AudioMuse-AI#479).
+ENV NUMBA_CACHE_DIR=/tmp/numba_cache
+
 ENV PYTHONPATH=/usr/local/lib/python3/dist-packages:/app
 
 EXPOSE 8000
 
 WORKDIR /workspace
-CMD ["bash", "-c", "if [ -n \"$TZ\" ] && [ -f \"/usr/share/zoneinfo/$TZ\" ]; then ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone; elif [ -n \"$TZ\" ]; then echo \"Warning: timezone '$TZ' not found in /usr/share/zoneinfo\" >&2; fi; if [ \"$SERVICE_TYPE\" = \"worker\" ]; then echo 'Starting worker processes via supervisord...' && /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf; else echo 'Starting web service...' && gunicorn --bind 0.0.0.0:8000 --workers 1 --timeout 120 app:app; fi"]
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
+CMD []

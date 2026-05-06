@@ -89,7 +89,7 @@ RUN set -ux; \
             libsndfile1=1.0.31-2ubuntu0.2 libsndfile1-dev \
             libopenblas-dev=0.3.20+ds-1 \
             liblapack-dev=3.10.0-2ubuntu1 \
-            libpq-dev \
+            libpq-dev postgresql-client \
             ffmpeg wget curl \
             supervisor procps \
             gcc g++ \
@@ -188,8 +188,12 @@ ENV LANG=C.UTF-8 \
     PYTHONUNBUFFERED=1 \
     DEBIAN_FRONTEND=noninteractive \
     HF_HOME=/app/.cache/huggingface \
-    HF_HUB_OFFLINE=1 \
-    TRANSFORMERS_OFFLINE=1
+    HF_HUB_DISABLE_XET=1 \
+    HF_XET_DISABLE=1
+
+# Note: bundled HuggingFace models (RoBERTa, MuLan, ...) load with
+# local_files_only=True per call. Lyrics is force-disabled on this image
+# (see ENV LYRICS_ENABLED=false below), so Marian translator is never invoked.
 
 WORKDIR /app
 
@@ -200,8 +204,6 @@ COPY --from=libraries /usr/local/bin/ /usr/local/bin/
 
 # Copy HuggingFace cache (RoBERTa model) from libraries stage
 COPY --from=libraries /app/.cache/huggingface/ /app/.cache/huggingface/
-# Copy console entrypoints (gunicorn, etc.) from libraries stage
-COPY --from=libraries /usr/local/bin/ /usr/local/bin/
 
 # Verify cache was copied correctly
 RUN ls -lah /app/.cache/huggingface/ && \
@@ -358,7 +360,10 @@ RUN set -eux; \
 
 # Copy application code (last to maximize cache hits for code changes)
 COPY . /app
+COPY deployment/docker-entrypoint.sh /app/docker-entrypoint.sh
 COPY deployment/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+RUN chmod +x /app/docker-entrypoint.sh
+RUN ls -l /etc/supervisor/conf.d && test -f /etc/supervisor/conf.d/supervisord.conf
 
 # ============================================================================
 # CPU CONSISTENCY SETTINGS
@@ -392,9 +397,15 @@ ENV MKL_ENABLE_INSTRUCTIONS=AVX2 \
 # Prevent aggressive memory pre-allocation on newer CPUs
 ENV ORT_DISABLE_MEMORY_PATTERN_OPTIMIZATION=1
 
+# Lyrics analysis requires whisper / silero-vad / llama-cpp / torch which either
+# need AVX2 prebuilt wheels or are intentionally not shipped in the no-AVX2
+# image. Force-disable the feature here so the rest of the app starts cleanly.
+ENV LYRICS_ENABLED=false
+
 ENV PYTHONPATH=/usr/local/lib/python3/dist-packages:/app
 
 EXPOSE 8000
 
 WORKDIR /workspace
-CMD ["bash", "-c", "if [ \"$SERVICE_TYPE\" = \"worker\" ]; then echo 'Starting worker processes via supervisord...' && /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf; else echo 'Starting web service...' && gunicorn --bind 0.0.0.0:8000 --workers 1 --timeout 120 app:app; fi"]
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
+CMD []

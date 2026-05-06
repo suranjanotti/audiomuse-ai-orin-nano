@@ -11,6 +11,12 @@ from unittest.mock import Mock, MagicMock, patch, call
 if "jwt" not in sys.modules:
     sys.modules["jwt"] = MagicMock()
 
+# Mock psycopg2.connect so that app.py module-level DB calls (init_db,
+# bootstrap_env_config_if_empty, save_config_values for JWT_SECRET) don't
+# require a real PostgreSQL server in CI.
+_pg_connect_patcher = patch("psycopg2.connect", return_value=MagicMock())
+_pg_connect_patcher.start()
+
 import pytest
 import numpy as np
 
@@ -252,7 +258,7 @@ class TestAnalyzeAlbumMemoryCleanup:
         mock_session = MagicMock()
         mock_ort.InferenceSession.return_value = mock_session
         
-        # Mock analyze_track to return results
+        # Mock analyze_track to return results including audio for lyrics analysis
         mock_analyze.return_value = (
             {
                 'tempo': 120.0,
@@ -267,7 +273,9 @@ class TestAnalyzeAlbumMemoryCleanup:
                 'relaxed': 0.4,
                 'sad': 0.2
             },
-            np.random.randn(200)
+            np.random.randn(200),
+            np.random.randn(16000),
+            16000
         )
         
         # Call function

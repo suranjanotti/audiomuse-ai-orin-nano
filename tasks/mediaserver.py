@@ -8,9 +8,12 @@ import config  # Import the config module to access server type and settings
 from tasks.mediaserver_jellyfin import (
     resolve_user as jellyfin_resolve_user,
     get_all_playlists as jellyfin_get_all_playlists,
+    get_lyrics as jellyfin_get_lyrics,
     delete_playlist as jellyfin_delete_playlist,
     get_recent_albums as jellyfin_get_recent_albums,
     get_tracks_from_album as jellyfin_get_tracks_from_album,
+    search_albums as jellyfin_search_albums,
+    test_connection as jellyfin_test_connection,
     download_track as jellyfin_download_track,
     get_all_songs as jellyfin_get_all_songs,
     get_playlist_by_name as jellyfin_get_playlist_by_name,
@@ -18,12 +21,16 @@ from tasks.mediaserver_jellyfin import (
     create_instant_playlist as jellyfin_create_instant_playlist,
     get_top_played_songs as jellyfin_get_top_played_songs,
     get_last_played_time as jellyfin_get_last_played_time,
+    list_libraries as _jellyfin_list_libraries,
 )
 from tasks.mediaserver_navidrome import (
     get_all_playlists as navidrome_get_all_playlists,
+    get_lyrics as navidrome_get_lyrics,
     delete_playlist as navidrome_delete_playlist,
     get_recent_albums as navidrome_get_recent_albums,
     get_tracks_from_album as navidrome_get_tracks_from_album,
+    search_albums as navidrome_search_albums,
+    test_connection as navidrome_test_connection,
     download_track as navidrome_download_track,
     get_all_songs as navidrome_get_all_songs,
     get_playlist_by_name as navidrome_get_playlist_by_name,
@@ -31,12 +38,16 @@ from tasks.mediaserver_navidrome import (
     create_instant_playlist as navidrome_create_instant_playlist,
     get_top_played_songs as navidrome_get_top_played_songs,
     get_last_played_time as navidrome_get_last_played_time,
+    list_libraries as _navidrome_list_libraries,
 )
 from tasks.mediaserver_lyrion import (
     get_all_playlists as lyrion_get_all_playlists,
+    get_lyrics as lyrion_get_lyrics,
     delete_playlist as lyrion_delete_playlist,
     get_recent_albums as lyrion_get_recent_albums,
     get_tracks_from_album as lyrion_get_tracks_from_album,
+    search_albums as lyrion_search_albums,
+    test_connection as lyrion_test_connection,
     download_track as lyrion_download_track,
     get_all_songs as lyrion_get_all_songs,
     get_playlist_by_name as lyrion_get_playlist_by_name,
@@ -44,6 +55,7 @@ from tasks.mediaserver_lyrion import (
     create_instant_playlist as lyrion_create_instant_playlist,
     get_top_played_songs as lyrion_get_top_played_songs,
     get_last_played_time as lyrion_get_last_played_time,
+    list_libraries as _lyrion_list_libraries,
 )
 from tasks.mediaserver_mpd import (
     get_all_playlists as mpd_get_all_playlists,
@@ -61,10 +73,13 @@ from tasks.mediaserver_mpd import (
 from tasks.mediaserver_emby import (
     resolve_user as emby_resolve_user,
     get_all_playlists as emby_get_all_playlists,
+    get_lyrics as emby_get_lyrics,
     delete_playlist as emby_delete_playlist,
     get_recent_albums as emby_get_recent_albums,
     get_recent_music_items as emby_get_recent_music_items,
     get_tracks_from_album as emby_get_tracks_from_album,
+    search_albums as emby_search_albums,
+    test_connection as emby_test_connection,
     download_track as emby_download_track,
     get_all_songs as emby_get_all_songs,
     get_playlist_by_name as emby_get_playlist_by_name,
@@ -72,6 +87,7 @@ from tasks.mediaserver_emby import (
     create_instant_playlist as emby_create_instant_playlist,
     get_top_played_songs as emby_get_top_played_songs,
     get_last_played_time as emby_get_last_played_time,
+    list_libraries as _emby_list_libraries,
 )
 
 logger = logging.getLogger(__name__)
@@ -149,13 +165,14 @@ def get_recent_music_items(limit):
         logger.info(f"get_recent_music_items not yet implemented for {config.MEDIASERVER_TYPE}, falling back to get_recent_albums")
         return get_recent_albums(limit)
 
-def get_tracks_from_album(album_id):
-    """Fetches tracks for an album using admin credentials."""
-    if config.MEDIASERVER_TYPE == 'jellyfin': return jellyfin_get_tracks_from_album(album_id)
-    if config.MEDIASERVER_TYPE == 'navidrome': return navidrome_get_tracks_from_album(album_id)
-    if config.MEDIASERVER_TYPE == 'lyrion': return lyrion_get_tracks_from_album(album_id)
-    if config.MEDIASERVER_TYPE == 'mpd': return mpd_get_tracks_from_album(album_id)
-    if config.MEDIASERVER_TYPE == 'emby': return emby_get_tracks_from_album(album_id)
+def get_tracks_from_album(album_id, user_creds=None, provider_type=None):
+    """Fetches tracks for an album, optionally using explicit creds."""
+    provider_type = provider_type or config.MEDIASERVER_TYPE
+    if provider_type == 'jellyfin': return jellyfin_get_tracks_from_album(album_id, user_creds=user_creds)
+    if provider_type == 'navidrome': return navidrome_get_tracks_from_album(album_id, user_creds=user_creds)
+    if provider_type == 'lyrion': return lyrion_get_tracks_from_album(album_id, user_creds=user_creds)
+    if provider_type == 'mpd': return mpd_get_tracks_from_album(album_id)
+    if provider_type == 'emby': return emby_get_tracks_from_album(album_id, user_creds=user_creds)
     return []
 
 def download_track(temp_dir, item):
@@ -237,14 +254,57 @@ def _detect_audio_format(filepath):
         logger.debug(f"Error detecting audio format: {e}")
         return '.tmp'
 
-def get_all_songs():
-    """Fetches all songs using admin credentials."""
-    if config.MEDIASERVER_TYPE == 'jellyfin': return jellyfin_get_all_songs()
-    if config.MEDIASERVER_TYPE == 'navidrome': return navidrome_get_all_songs()
-    if config.MEDIASERVER_TYPE == 'lyrion': return lyrion_get_all_songs()
-    if config.MEDIASERVER_TYPE == 'mpd': return mpd_get_all_songs()
-    if config.MEDIASERVER_TYPE == 'emby': return emby_get_all_songs()
+def get_all_songs(user_creds=None, provider_type=None, apply_filter=True):
+    """Fetches all songs using admin credentials or explicit creds.
+
+    ``apply_filter`` is forwarded to providers that honor
+    ``config.MUSIC_LIBRARIES`` (currently Navidrome). Migration probes pass
+    ``apply_filter=False`` so the source provider's library filter does not
+    falsely exclude tracks from the target server during dry-run.
+    """
+    provider_type = provider_type or config.MEDIASERVER_TYPE
+    if provider_type == 'jellyfin': return jellyfin_get_all_songs(user_creds=user_creds)
+    if provider_type == 'navidrome': return navidrome_get_all_songs(user_creds=user_creds, apply_filter=apply_filter)
+    if provider_type == 'lyrion': return lyrion_get_all_songs(user_creds=user_creds)
+    if provider_type == 'mpd': return mpd_get_all_songs()
+    if provider_type == 'emby': return emby_get_all_songs(user_creds=user_creds)
     return []
+
+def list_libraries(user_creds=None, provider_type=None):
+    """List all music libraries/folders a provider exposes.
+
+    Returns {'libraries': [{'id': str, 'name': str}, ...], 'unsupported': bool}.
+    The setup wizard and migration assistant use this to render a checkbox list
+    after a successful test-connection. Uses admin credentials when
+    ``user_creds`` is None, or the supplied creds when probing a target.
+    """
+    provider_type = provider_type or config.MEDIASERVER_TYPE
+    if provider_type == 'jellyfin':  return {'libraries': _jellyfin_list_libraries(user_creds=user_creds), 'unsupported': False}
+    if provider_type == 'navidrome': return {'libraries': _navidrome_list_libraries(user_creds=user_creds), 'unsupported': False}
+    if provider_type == 'lyrion':    return {'libraries': _lyrion_list_libraries(user_creds=user_creds), 'unsupported': False}
+    if provider_type == 'emby':      return {'libraries': _emby_list_libraries(user_creds=user_creds), 'unsupported': False}
+    return {'libraries': [], 'unsupported': True}
+
+def search_albums(query, user_creds=None, provider_type=None):
+    """Searches for albums using admin credentials or explicit creds."""
+    provider_type = provider_type or config.MEDIASERVER_TYPE
+    if provider_type == 'jellyfin': return jellyfin_search_albums(query, user_creds=user_creds)
+    if provider_type == 'navidrome': return navidrome_search_albums(query, user_creds=user_creds)
+    if provider_type == 'lyrion': return lyrion_search_albums(query, user_creds=user_creds)
+    if provider_type == 'mpd': raise NotImplementedError('MPD album search is not supported')
+    if provider_type == 'emby': return emby_search_albums(query, user_creds=user_creds)
+    return []
+
+def test_connection(user_creds=None, provider_type=None):
+    """Tests provider connection using admin credentials or explicit creds."""
+    provider_type = provider_type or config.MEDIASERVER_TYPE
+    if provider_type == 'jellyfin': return jellyfin_test_connection(user_creds=user_creds)
+    if provider_type == 'navidrome': return navidrome_test_connection(user_creds=user_creds)
+    if provider_type == 'lyrion': return lyrion_test_connection(user_creds=user_creds)
+    if provider_type == 'mpd':
+        return {'ok': False, 'error': 'MPD migration probe is not supported', 'sample_count': 0, 'path_format': 'none', 'warnings': []}
+    if provider_type == 'emby': return emby_test_connection(user_creds=user_creds)
+    return {'ok': False, 'error': f"Provider '{provider_type}' not supported", 'sample_count': 0, 'path_format': 'none', 'warnings': []}
 
 def get_playlist_by_name(playlist_name):
     """Finds a playlist by name using admin credentials."""
@@ -309,5 +369,22 @@ def get_last_played_time(item_id, user_creds=None):
         return mpd_get_last_played_time(item_id, user_creds)
     if config.MEDIASERVER_TYPE == 'emby':
         return emby_get_last_played_time(item_id, user_creds)
+    return None
+
+def get_lyrics(track_id: str, timeout: float = 2.5):
+    """Fetch lyrics embedded in the media server for a given track ID.
+
+    Supported servers: Jellyfin, Emby, Navidrome, Lyrion.
+    MPD does not provide a lyrics API; always returns None.
+    Returns plain text or None.
+    """
+    if config.MEDIASERVER_TYPE == 'jellyfin':
+        return jellyfin_get_lyrics(track_id, timeout=timeout)
+    if config.MEDIASERVER_TYPE == 'emby':
+        return emby_get_lyrics(track_id, timeout=timeout)
+    if config.MEDIASERVER_TYPE == 'navidrome':
+        return navidrome_get_lyrics(track_id, timeout=timeout)
+    if config.MEDIASERVER_TYPE == 'lyrion':
+        return lyrion_get_lyrics(track_id, timeout=timeout)
     return None
 

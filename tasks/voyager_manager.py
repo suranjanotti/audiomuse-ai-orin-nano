@@ -190,7 +190,10 @@ def load_voyager_index_for_querying(force_reload=False):
             return
 
         # 2) If not found, look for segmented rows named INDEX_NAME_<part>_<total>
-        cur.execute("SELECT index_name, index_data, id_map_json, embedding_dimension FROM voyager_index_data WHERE index_name LIKE %s", (INDEX_NAME + "_%_%",))
+        cur.execute(
+            "SELECT index_name, index_data, id_map_json, embedding_dimension FROM voyager_index_data WHERE index_name LIKE %s ESCAPE '\\'",
+            (INDEX_NAME.replace('_', r'\_') + r"\_%\_%",)
+        )
         candidates = cur.fetchall()
 
         if not candidates:
@@ -240,20 +243,19 @@ def load_voyager_index_for_querying(force_reload=False):
                 return
 
         # Reassemble binary and pick id_map_json from first non-empty segment (prefer part 1)
-        index_binary_data = b"".join([p[1] for p in parts])
-        if not index_binary_data:
-            logger.error(f"Reassembled Voyager index binary is empty. Aborting load.")
-            voyager_index, id_map, reverse_id_map = None, None, None
-            return
+        index_stream = tempfile.TemporaryFile()
+        for _, part_data, _, _ in parts:
+            index_stream.write(part_data)
+        index_stream.seek(0)
 
         if not id_map_json_candidate:
             logger.error("No non-empty id_map_json found in segmented Voyager index rows. Aborting load.")
             voyager_index, id_map, reverse_id_map = None, None, None
+            index_stream.close()
             return
 
         # Final validation: try loading Voyager and ensure element count matches id_map length
         try:
-            index_stream = io.BytesIO(index_binary_data)
             loaded_index = voyager.Index.load(index_stream)
             loaded_index.ef = VOYAGER_QUERY_EF
             # Validate element counts if voyager exposes num_elements
@@ -278,6 +280,11 @@ def load_voyager_index_for_querying(force_reload=False):
             logger.error(f"Failed to load reassembled Voyager index: {load_error}", exc_info=True)
             voyager_index, id_map, reverse_id_map = None, None, None
             return
+        finally:
+            try:
+                index_stream.close()
+            except Exception as close_error:
+                logger.warning("Failed to close Voyager index stream: %s", close_error, exc_info=True)
 
     except Exception as e:
         logger.error("Failed to load Voyager index from database: %s", e, exc_info=True)
@@ -394,7 +401,10 @@ def build_and_store_voyager_index(db_conn=None):
 
         try:
             # Delete any existing single or segmented rows for this logical index name
-            cur.execute("DELETE FROM voyager_index_data WHERE index_name = %s OR index_name LIKE %s", (INDEX_NAME, INDEX_NAME + "_%_%"))
+            cur.execute(
+                "DELETE FROM voyager_index_data WHERE index_name = %s OR index_name LIKE %s ESCAPE '\\'",
+                (INDEX_NAME, INDEX_NAME.replace('_', r'\_') + r"\_%\_%")
+            )
 
             # Small enough to store in a single row (backwards-compatible)
             if len(index_binary_data) <= VOYAGER_MAX_PART_SIZE:
@@ -622,10 +632,10 @@ def _deduplicate_and_filter_neighbors(song_results: list, db_conn, original_song
     def fetch_details_batch(id_batch):
         batch_details = {}
         with db_conn.cursor(cursor_factory=DictCursor) as cur:
-            cur.execute("SELECT item_id, title, author, album FROM score WHERE item_id = ANY(%s)", (id_batch,))
+            cur.execute("SELECT item_id, title, author, album, album_artist FROM score WHERE item_id = ANY(%s)", (id_batch,))
             rows = cur.fetchall()
             for row in rows:
-                batch_details[row['item_id']] = {'title': row['title'], 'author': row['author'], 'album': row.get('album')}
+                batch_details[row['item_id']] = {'title': row['title'], 'author': row['author'], 'album': row.get('album'), 'album_artist': row.get('album_artist')}
         return batch_details
     
     # Split item_ids into batches for parallel DB queries
@@ -901,7 +911,7 @@ def _radius_walk_get_candidates(
         # Fetch details in batch (uses app_helper get_score_data_by_ids)
         try:
             track_details_list = get_score_data_by_ids(item_ids_to_fetch)
-            details_map = {d['item_id']: {'title': d.get('title'), 'author': d.get('author'), 'album': d.get('album')} for d in track_details_list}
+            details_map = {d['item_id']: {'title': d.get('title'), 'author': d.get('author'), 'album': d.get('album'), 'album_artist': d.get('album_artist')} for d in track_details_list}
         except Exception:
             details_map = {}
 
@@ -1591,10 +1601,10 @@ def find_nearest_neighbors_by_vector(query_vector: np.ndarray, n: int = 100, eli
     def fetch_details_batch(id_batch):
         batch_details = {}
         with db_conn.cursor(cursor_factory=DictCursor) as cur:
-            cur.execute("SELECT item_id, title, author, album FROM score WHERE item_id = ANY(%s)", (id_batch,))
+            cur.execute("SELECT item_id, title, author, album, album_artist FROM score WHERE item_id = ANY(%s)", (id_batch,))
             rows = cur.fetchall()
             for row in rows:
-                batch_details[row['item_id']] = {'title': row['title'], 'author': row['author'], 'album': row.get('album')}
+                batch_details[row['item_id']] = {'title': row['title'], 'author': row['author'], 'album': row.get('album'), 'album_artist': row.get('album_artist')}
         return batch_details
     
     # Split item_ids into batches for parallel DB queries
@@ -1729,13 +1739,15 @@ def get_item_id_by_title_and_artist(title: str, artist: str):
     finally:
         cur.close()
 
-def search_tracks_unified(search_query: str, limit: int = 20, offset: int = 0):
+def search_tracks_unified(search_query: str, limit: int = 20, offset: int = 0,
+                          item_id_filter: set = None):
     """
     Deterministic substring search over title, author and album.
 
     - Accent and case insensitive
     - Each token must match title, author or album
     - Ranking priority: title > author > album
+    - item_id_filter: optional set of item_ids to restrict results to
     """
 
     from app_helper import get_db
@@ -1776,10 +1788,23 @@ def search_tracks_unified(search_query: str, limit: int = 20, offset: int = 0):
         where_sql = " AND ".join(where_clauses)
         score_sql = " + ".join(score_clauses)
 
+        # Optionally restrict to a specific set of item_ids (e.g. SemGrove index)
+        # IMPORTANT: id_filter params must be inserted *after* the WHERE token params
+        # but *before* the score/ORDER BY params so they match the SQL position.
+        id_filter_sql = ""
+        id_filter_params: list = []
+        if item_id_filter:
+            id_placeholders = ",".join(["%s"] * len(item_id_filter))
+            id_filter_sql = f" AND item_id IN ({id_placeholders})"
+            id_filter_params = list(item_id_filter)
+
+        # Final param list order must mirror SQL: WHERE tokens → WHERE id filter → ORDER BY scores → LIMIT/OFFSET
+        all_params = params[:len(tokens)] + id_filter_params + params[len(tokens):]
+
         query = f"""
-            SELECT item_id, title, author, album
+            SELECT item_id, title, author, album, album_artist
             FROM score
-            WHERE {where_sql}
+            WHERE {where_sql}{id_filter_sql}
             ORDER BY ({score_sql}) DESC,
                      title,
                      author,
@@ -1787,10 +1812,10 @@ def search_tracks_unified(search_query: str, limit: int = 20, offset: int = 0):
             LIMIT %s OFFSET %s
         """
 
-        params.append(limit)
-        params.append(offset)
+        all_params.append(limit)
+        all_params.append(offset)
 
-        cur.execute(query, tuple(params))
+        cur.execute(query, tuple(all_params))
         results = [dict(row) for row in cur.fetchall()]
 
     except Exception as e:

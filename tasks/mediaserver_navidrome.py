@@ -6,6 +6,8 @@ import os
 import random
 import config
 
+from tasks.mediaserver_helper import detect_path_format
+
 logger = logging.getLogger(__name__)
 
 REQUESTS_TIMEOUT = 300
@@ -15,10 +17,15 @@ NAVIDROME_API_BATCH_SIZE = 40
 # NAVIDROME (SUBSONIC API) IMPLEMENTATION
 # ##############################################################################
 
-def _get_target_music_folder_ids():
+def _get_target_music_folder_ids(user_creds=None):
     """
     Parses config for music folder names and returns their IDs for filtering using a robust,
     case-insensitive matching against the server's actual folder configuration.
+
+    ``user_creds`` is forwarded to the underlying ``_navidrome_request`` call so
+    callers operating outside the live-provider context (e.g. migration probes
+    where Navidrome is the *target* and ``config.NAVIDROME_*`` globals are
+    empty) can still hit ``getMusicFolders`` with valid credentials.
     """
     folder_names_str = getattr(config, 'MUSIC_LIBRARIES', '')
 
@@ -28,13 +35,19 @@ def _get_target_music_folder_ids():
     target_names_lower = {name.strip().lower() for name in folder_names_str.split(',') if name.strip()}
 
     # Use the getMusicFolders endpoint to get the available music folders.
-    response = _navidrome_request("getMusicFolders")
+    response = _navidrome_request("getMusicFolders", user_creds=user_creds)
     
     if not (response and "musicFolders" in response and "musicFolder" in response["musicFolders"]):
         logger.error("Failed to fetch music folders from Navidrome or response format unexpected.")
         return set()
 
+    # Subsonic-compatible servers may return a single dict (not a list) when
+    # only one folder exists. Coerce to a list for consistent iteration.
     all_folders = response["musicFolders"]["musicFolder"]
+    if isinstance(all_folders, dict):
+        all_folders = [all_folders]
+    elif not isinstance(all_folders, list):
+        all_folders = []
 
     # Build a case-insensitive map: lowercase_name -> {'name': OriginalCaseName, 'id': FolderId}
     folder_map = {
@@ -70,6 +83,33 @@ def _get_target_music_folder_ids():
     logger.info(f"Filtering analysis to {len(music_folder_ids)} Navidrome folders: {found_names_original_case}")
     return music_folder_ids
 
+def list_libraries(user_creds=None):
+    """List all music folders exposed by a Navidrome server.
+
+    Unlike `_get_target_music_folder_ids()`, this does NOT read
+    `config.MUSIC_LIBRARIES` and does NOT filter — it returns every folder the
+    server reports. `_navidrome_request` already forwards `user_creds`, so the
+    migration assistant can list folders for a target server without mutating
+    the global config (which would conflict with the b426682 fix).
+    """
+    response = _navidrome_request("getMusicFolders", user_creds=user_creds)
+    if not (response and "musicFolders" in response and "musicFolder" in response["musicFolders"]):
+        return []
+    # Subsonic-compatible servers may return a single dict (not a list) when
+    # only one folder exists, depending on server implementation and JSON
+    # parser configuration — coerce to a list so iteration is consistent.
+    all_folders = response["musicFolders"]["musicFolder"]
+    if isinstance(all_folders, dict):
+        all_folders = [all_folders]
+    elif not isinstance(all_folders, list):
+        all_folders = []
+    return [
+        {'id': str(f['id']), 'name': f['name']}
+        for f in all_folders
+        if isinstance(f, dict) and 'id' in f and 'name' in f
+    ]
+
+
 def get_navidrome_auth_params(username=None, password=None):
     """Generates Navidrome auth params, using provided creds or falling back to global config."""
     auth_user = username or config.NAVIDROME_USER
@@ -78,9 +118,9 @@ def get_navidrome_auth_params(username=None, password=None):
         logger.warning("Navidrome User or Password is not configured.")
         return {}
     hex_encoded_password = auth_pass.encode('utf-8').hex()
-    return {"u": auth_user, "p": f"enc:{hex_encoded_password}", "v": "1.16.1", "c": f"AudioMuse-AI/{config.APP_VERSION}", "f": "json"}
+    return {"u": auth_user, "p": f"enc:{hex_encoded_password}", "v": "1.16.1", "c": "AudioMuse-AI", "f": "json"}
 
-def _navidrome_request(endpoint, params=None, method='get', stream=False, user_creds=None):
+def _navidrome_request(endpoint, params=None, method='get', stream=False, user_creds=None, timeout=None):
     """
     Helper to make Navidrome API requests. It sends all parameters in the URL's
     query string, which is the expected behavior for Subsonic APIs, but can cause
@@ -95,11 +135,12 @@ def _navidrome_request(endpoint, params=None, method='get', stream=False, user_c
         logger.error("Navidrome credentials not configured. Cannot make API call.")
         return None
 
-    url = f"{config.NAVIDROME_URL}/rest/{endpoint}.view"
+    base_url = (user_creds.get('url') if user_creds and user_creds.get('url') else config.NAVIDROME_URL).rstrip('/')
+    url = f"{base_url}/rest/{endpoint}.view"
     all_params = {**auth_params, **params}
 
     try:
-        r = requests.request(method, url, params=all_params, timeout=REQUESTS_TIMEOUT, stream=stream)
+        r = requests.request(method, url, params=all_params, timeout=timeout or REQUESTS_TIMEOUT, stream=stream)
         r.raise_for_status()
 
         if stream:
@@ -249,12 +290,19 @@ def _select_best_artist(song_item, title="Unknown"):
     
     return track_artist, artist_id
 
-def get_all_songs():
+def get_all_songs(user_creds=None, apply_filter=True):
     """
-    Fetches all songs from Navidrome using admin credentials.
-    If MUSIC_LIBRARIES is set, it will only return songs from those folders.
+    Fetches all songs from Navidrome using admin or override credentials.
+
+    ``apply_filter`` controls whether ``config.MUSIC_LIBRARIES`` is honored.
+    Live-provider scans default to ``True`` so the user's saved selection is
+    respected. Migration probes pass ``False`` because ``config.MUSIC_LIBRARIES``
+    holds the *source* provider's library names, which would falsely filter
+    out the *target* server's tracks during dry-run. Making this an explicit
+    parameter (instead of inferring intent from ``user_creds``) keeps the
+    contract clear for future callers.
     """
-    target_folder_ids = _get_target_music_folder_ids()
+    target_folder_ids = _get_target_music_folder_ids(user_creds=user_creds) if apply_filter else None
     
     # Case 1: Config is set, but no matching folders were found. Return no songs.
     if isinstance(target_folder_ids, set) and not target_folder_ids:
@@ -270,7 +318,7 @@ def get_all_songs():
         limit = 500
         while True:
             params = {"query": '', "songCount": limit, "songOffset": offset}
-            response = _navidrome_request("search3", params)
+            response = _navidrome_request("search3", params, user_creds=user_creds)
             if response and "searchResult3" in response and "song" in response["searchResult3"]:
                 songs = response["searchResult3"]["song"]
                 if not songs: break
@@ -283,12 +331,23 @@ def get_all_songs():
                     artist_name = s.get('artist', 'Unknown Artist')
                     # artistId in search3 response refers to the album artist
                     artist_id = s.get('artistId')
+                    # Navidrome reports the file path under ``path`` when
+                    # "Report Real Path" is enabled, otherwise it shows up
+                    # in ``url``. Fall back to ``url`` so downstream path
+                    # detection / matching gets the value either way (the
+                    # step-2 test_connection probe already does this).
+                    raw_path = s.get('path') or s.get('url')
                     all_songs.append({
-                        'Id': s.get('id'), 
-                        'Name': title, 
+                        'Id': s.get('id'),
+                        'Name': title,
                         'AlbumArtist': artist_name,
                         'ArtistId': artist_id,
-                        'Path': s.get('path')
+                        'OriginalAlbumArtist': s.get('displayAlbumArtist') or s.get('albumArtist'),
+                        'Album': s.get('album'),
+                        'Path': raw_path,
+                        'Year': s.get('year'),
+                        'Rating': s.get('userRating') if s.get('userRating') else None,
+                        'FilePath': raw_path,
                     })
                 
                 offset += len(songs)
@@ -329,18 +388,102 @@ def get_all_songs():
             album_id = album.get('id')
             if not album_id: continue
             
-            album_songs = get_tracks_from_album(album_id)
+            album_songs = get_tracks_from_album(album_id, user_creds=user_creds)
             for song in album_songs:
                 # Convert to the expected format
                 all_songs.append({
-                    'Id': song.get('Id'), 
-                    'Name': song.get('Name'), 
+                    'Id': song.get('Id'),
+                    'Name': song.get('Name'),
                     'AlbumArtist': song.get('AlbumArtist'),
                     'ArtistId': song.get('ArtistId'),
-                    'Path': song.get('Path')
+                    'OriginalAlbumArtist': song.get('OriginalAlbumArtist'),
+                    'Album': song.get('Album'),
+                    'Path': song.get('Path'),
+                    'Year': song.get('Year'),
+                    'Rating': song.get('Rating'),
+                    'FilePath': song.get('FilePath'),
                 })
 
     return all_songs
+
+
+def search_albums(query, user_creds=None):
+    """Search Navidrome albums using admin or override credentials."""
+    body = _navidrome_request("search3", {
+        "query": query,
+        "albumCount": 10,
+        "songCount": 0,
+        "artistCount": 0,
+    }, user_creds=user_creds)
+    if not body:
+        return []
+    albums = ((body.get('searchResult3') or {}).get('album')) or []
+    return [
+        {
+            'id':          a.get('id'),
+            'name':        a.get('name') or a.get('title'),
+            'artist':      a.get('artist'),
+            'year':        a.get('year'),
+            'track_count': a.get('songCount'),
+        }
+        for a in albums
+    ]
+
+
+def test_connection(user_creds=None):
+    """Test Navidrome connectivity using admin or override credentials."""
+    warnings = []
+    body = _navidrome_request("search3", {
+        "query": '',
+        "songCount": 100,
+        "songOffset": 0,
+        "artistCount": 0,
+        "albumCount": 0,
+    }, user_creds=user_creds)
+    if not body:
+        return {'ok': False, 'error': 'Navidrome test_connection failed', 'sample_count': 0, 'path_format': 'none', 'warnings': []}
+    songs = (body.get('searchResult3') or {}).get('song')
+    if songs is None:
+        songs = []
+    elif isinstance(songs, dict):
+        songs = [songs]
+    elif isinstance(songs, tuple):
+        songs = list(songs)
+    elif not isinstance(songs, list):
+        songs = []
+
+    sample = []
+    for s in songs:
+        if not isinstance(s, dict):
+            continue
+        title = s.get('title', 'Unknown')
+        track_artist = s.get('artist') or s.get('albumArtist') or 'Unknown Artist'
+        sample.append({
+            'Id': s.get('id'),
+            'Path': s.get('path') or s.get('url'),
+            'Name': title,
+            'AlbumArtist': s.get('albumArtist') or s.get('artist'),
+            'artist': track_artist,
+            'url': s.get('url'),
+        })
+    path_format = detect_path_format(sample)
+    if path_format != 'absolute':
+        warnings.append(
+            'Navidrome is returning relative paths or no paths at all. '
+            'This happens when "Report Real Path" is disabled in Navidrome '
+            '(Settings > Players > AudioMuse-AI [python-requests]). '
+            'Automatic path-based matching will not work well. Enable Report '
+            'Real Path and re-test, or you will need to manually match most '
+            'albums in Step 4.'
+        )
+    return {
+        'ok': True,
+        'error': None,
+        'sample_count': len(sample),
+        'path_format': path_format,
+        'warnings': warnings,
+    }
+
 
 def _add_to_playlist(playlist_id, item_ids, user_creds=None):
     """
@@ -353,7 +496,12 @@ def _add_to_playlist(playlist_id, item_ids, user_creds=None):
     logger.info(f"Adding {len(item_ids)} songs to Navidrome playlist ID {playlist_id} in batches.")
     for i in range(0, len(item_ids), NAVIDROME_API_BATCH_SIZE):
         batch_ids = item_ids[i:i + NAVIDROME_API_BATCH_SIZE]
-        params = {"playlistId": playlist_id, "songIdToAdd": batch_ids}
+        params = {
+            "playlistId": playlist_id,
+            "songIdToAdd": batch_ids,
+            # Keep visibility in sync with Navidrome updatePlaylist expectations (public=true).
+            "public": "true",
+        }
         
         # Note: updatePlaylist uses a POST method.
         response = _navidrome_request("updatePlaylist", params, method='post', user_creds=user_creds)
@@ -378,7 +526,11 @@ def _create_playlist_batched(playlist_name, item_ids, user_creds=None):
     ids_for_creation = item_ids[:NAVIDROME_API_BATCH_SIZE]
     ids_to_add_later = item_ids[NAVIDROME_API_BATCH_SIZE:]
 
-    create_params = {"name": playlist_name, "songId": ids_for_creation}
+    # createPlaylist does not reliably support visibility; we set public via updatePlaylist below.
+    create_params = {
+        "name": playlist_name,
+        "songId": ids_for_creation,
+    }
     create_response = _navidrome_request("createPlaylist", create_params, method='post', user_creds=user_creds)
 
     # --- Extract playlist object directly from the creation response ---
@@ -394,6 +546,16 @@ def _create_playlist_batched(playlist_name, item_ids, user_creds=None):
         return None
 
     logger.info(f"✅ Created Navidrome playlist '{playlist_name}' (ID: {new_playlist_id}) with the first {len(ids_for_creation)} songs.")
+
+    # Immediately update playlist to public (Navidrome requires updatePlaylist for visibility).
+    update_response = _navidrome_request(
+        "updatePlaylist",
+        {"playlistId": new_playlist_id, "public": "true"},
+        method='post',
+        user_creds=user_creds,
+    )
+    if not (update_response and update_response.get("status") == "ok"):
+        logger.error(f"Failed to set playlist '{playlist_name}' public after creation via updatePlaylist.")
 
     # If there are more songs to add, use the ID we just got
     if ids_to_add_later:
@@ -443,13 +605,22 @@ def get_tracks_from_album(album_id, user_creds=None):
             title = s.get('title', 'Unknown')
             artist, artist_id = _select_best_artist(s, title)
             logger.debug(f"getAlbum track '{title}': artist='{artist}', artist_id='{artist_id}', raw_artistId='{s.get('artistId')}', raw_albumArtistId='{s.get('albumArtistId')}'")
+            # ``path`` is the canonical key when "Report Real Path" is on;
+            # ``url`` is the fallback Navidrome uses otherwise. Try both so
+            # path-based migration matching works in either configuration.
+            raw_path = s.get('path') or s.get('url')
             result.append({
-                **s, 
-                'Id': s.get('id'), 
-                'Name': title, 
+                **s,
+                'Id': s.get('id'),
+                'Name': title,
                 'AlbumArtist': artist,
                 'ArtistId': artist_id,
-                'Path': s.get('path')
+                'OriginalAlbumArtist': s.get('displayAlbumArtist') or s.get('albumArtist'),
+                'Album': s.get('album'),
+                'Path': raw_path,
+                'Year': s.get('year'),
+                'Rating': s.get('userRating') if s.get('userRating') else None,
+                'FilePath': raw_path,
             })
         return result
     return []
@@ -489,6 +660,28 @@ def get_last_played_time(item_id, user_creds):
     response = _navidrome_request("getSong", {"id": item_id}, user_creds=user_creds)
     if response and "song" in response: return response["song"].get("lastPlayed")
     return None
+
+def get_lyrics(track_id: str, timeout: float = 2.5):
+    """Fetch embedded lyrics from Navidrome via the OpenSubsonic getLyricsBySongId extension.
+
+    Requires Navidrome 0.49.0+ with OpenSubsonic support.
+    Returns plain text (newline-separated lines) or None.
+    """
+    try:
+        response = _navidrome_request('getLyricsBySongId', params={'id': track_id}, timeout=timeout)
+        if not response:
+            return None
+        structured = response.get('lyricsList', {}).get('structuredLyrics', [])
+        if not structured:
+            return None
+        # Prefer unsynced (plain) lyrics; fall back to any available
+        chosen = next((e for e in structured if not e.get('synced')), structured[0])
+        lines = [l.get('value', '') for l in chosen.get('line', []) if l.get('value')]
+        text = '\n'.join(lines)
+        return text.strip() or None
+    except Exception as exc:
+        logger.debug('Navidrome get_lyrics failed for %s: %s', track_id, exc)
+        return None
 
 def create_instant_playlist(playlist_name, item_ids, user_creds):
     """Creates a new instant playlist on Navidrome for a specific user, with batching."""

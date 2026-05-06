@@ -48,13 +48,22 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     });
 
+    // --- Submenu accordion toggle ---
+    document.querySelectorAll('.has-submenu > .submenu-toggle').forEach(link => {
+        link.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            link.closest('.has-submenu').classList.toggle('open');
+        });
+    });
+
     // Display App Version from meta tag
     const versionMeta = document.querySelector('meta[name="app-version"]');
     if (versionMeta && versionMeta.content) {
         const appVersion = versionMeta.content;
         const versionElement = document.createElement('div');
         versionElement.className = 'app-version'; // For styling
-        versionElement.textContent = `AudioMuse-AI - Version ${appVersion}`;
+        versionElement.textContent = `AudioMuse-AI - ${appVersion}`;
         sidebar.appendChild(versionElement);
     }
 
@@ -109,18 +118,4 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 
-    // Logout button (only present when auth is enabled)
-    const logoutBtn = document.getElementById('logout-btn');
-    if (logoutBtn) {
-        logoutBtn.addEventListener('click', async (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            try {
-                await fetch('/logout', { method: 'POST' });
-            } catch (_) {
-                // Ignore network errors — proceed to redirect anyway
-            }
-            window.location.href = '/login';
-        });
-    }
 });

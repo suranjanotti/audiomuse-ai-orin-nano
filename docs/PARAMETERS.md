@@ -1,6 +1,6 @@
 # Configuration Parameters
 
-These are the parameters accepted for this script. You can pass them as environment variables using, for example, /deployment/deployment.yaml in this repository.
+These are the parameters accepted for this script. From `v1.0.0`, only PostgreSQL, Redis, and `TZ` configuration must still be configured via environment variables. All other configuration values are managed through the browser setup wizard and persisted in the database. For compatibility with legacy installations, environment variables are imported into the database automatically on first startup. The Setup Wizard is shown on clean installation as lending page and is also available later from the menu under Administration > Setup Wizard.
 
 How to find jellyfin **userid**:
 * Log into Jellyfin from your browser as an admin
@@ -17,6 +17,7 @@ The **mandatory** parameter that you need to change from the example are this:
 
 | Parameter            | Description                                                             | Default Value                     |
 |----------------------|-------------------------------------------------------------------------|-----------------------------------|
+| **Mediaserver General**                        |                                                                 |                 |
 | `JELLYFIN_URL`       | (Required) Your Jellyfin server's full URL                              | `http://YOUR_JELLYFIN_IP:8096`    |
 | `JELLYFIN_USER_ID`   | (Required) Jellyfin User ID.                                            | *(N/A - from Secret)* |
 | `JELLYFIN_TOKEN`     | (Required) Jellyfin API Token.                                          | *(N/A - from Secret)* |
@@ -36,8 +37,14 @@ The **mandatory** parameter that you need to change from the example are this:
 | `GEMINI_API_KEY`     | (Required if `AI_MODEL_PROVIDER` is GEMINI) Your Google Gemini API Key. | *(N/A - from Secret)* |
 | `MISTRAL_API_KEY`    | (Required if `AI_MODEL_PROVIDER` is MISTRAL) Your Mistral API Key.      | *(N/A - from Secret)* |
 | `OPENAI_API_KEY`     | (Required if `AI_MODEL_PROVIDER` is OPENAI) Your OpenAI / OpenRouter API Key. | *(N/A - from Secret)* |
+| **AudioMuse-AI Authentication**                        |                                                                 |                 |
+| `AUTH_ENABLED`     | Enable the AudioMuse-AI authentication layer | `true`|
+| `AUDIOMUSE_USER`    | User to login on the AudioMuse-AI integrated frontned     | *(N/A - from Secret)* |
+| `AUDIOMUSE_PASSWORD`     | Password to login on the AudioMuse-AI integrated frontned   | *(N/A - from Secret)* |
+| `API_TOKEN`     | API_TOLEN for plugin authentication | *(N/A - from Secret)* |
+| `JWT_SECRET`     | Used to inizializate the JWT session with a predefined value | *from Secret OR automatically created if blank* |
 
-The following additional environment variables control authentication.  Leave
+The following additional parameter control authentication.  Leave
 all four empty to disable auth (default).
 
 | Parameter            | Description                                          | Default |
@@ -52,7 +59,6 @@ These parameters can be left as-is:
 
 | Parameter               | Description                                  | Default Value     |
 |-------------------------|----------------------------------------------|-------------------|
-| `TEMP_DIR`              | Temp directory for audio files              | `/app/temp_audio` |
 | `CLEANING_SAFETY_LIMIT` | Max number of albums deleted during cleaning | `100`             |
 | `MUSIC_LIBRARIES`       | Comma-separated list of music libraries/folders for analysis. If empty, all libraries/folders are scanned. For Lyrion: Use folder paths like "/music/myfolder". For Jellyfin/Navidrome: Use library/folder names. | `""` (empty - scan all) |
 | `ENABLE_PROXY_FIX` | Enable Proxy Fix for Flask when behind a reverse proxy. Example Nginx configuration: [config.py](https://github.com/NeptuneHub/AudioMuse-AI/blob/main/config.py#L346) | `false` |
@@ -73,7 +79,6 @@ These are the default parameters used when launching analysis or clustering task
 | `NUM_RECENT_ALBUMS`                         | Number of recent albums to scan (0 for all).                                                                              | `0`             |
 | `TOP_N_MOODS`                               | Number of top moods per track for feature vector.                                                                         | `5`             |
 | `CLAP_ENABLED`                              | Enable or disable CLAP model for text-to-audio search capabilities.                                                       | `true`          |
-| `MULAN_ENABLED`                             | Enable or disable MuLan (MuQ) model for text-to-audio search capabilities.  **STILL IN DEVELOPING**                       | `false`          |
 | `CLAP_PYTHON_MULTITHREADS`                  | CPU threading for CLAP analysis. False (default) = Use ONNX internal threading (recommended). True = Use Python ThreadPoolExecutor  | `false`         |
 | **Clustering General**                      |                                                                                                                            |                 |
 | `ENABLE_CLUSTERING_EMBEDDINGS`              | Whether to use audio embeddings (True) or score-based features (False) for clustering.                                    | `true`          |
@@ -85,7 +90,6 @@ These are the default parameters used when launching analysis or clustering task
 | `TOP_N_PLAYLISTS`                           | POST Clustering it keep only the top N diverse playlist.                                                                  | `8`             |
 | `USE_GPU_CLUSTERING`                        | When true enalbe the use of GPU on K-Means, DBSCAN and PCA                                                                | `false`         |
 | **Similarity General**                      |                                                                                                                           |                 |
-| `INDEX_NAME`                                | Name of the index, no need to change.                                                                                     | `music_library` |
 | `VOYAGER_EF_CONSTRUCTION`                   | Number of element analyzed to create the neighbor list in the index.                                                      | `1024`          |
 | `VOYAGER_M`                                 | Number of neighbore More = higher accuracy.                                                                               | `64`            |
 | `VOYAGER_QUERY_EF`                          | Number neighbor analyzed during the query.                                                                                | `1024`          |
@@ -126,7 +130,6 @@ These are the default parameters used when launching analysis or clustering task
 | **K-Means Ranges**                          |                                                                                            |                                        |
 | `NUM_CLUSTERS_MIN`                          | Min $K$ for K-Means.                                                                      | `40`                                   |
 | `NUM_CLUSTERS_MAX`                          | Max $K$ for K-Means.                                                                      | `100`                                  |
-| `USE_MINIBATCH_KMEANS`                      | Whether to use MiniBatchKMeans (True) or standard KMeans (False) when clustering embeddings. | `false`                            |
 | **DBSCAN Ranges**                           |                                                                                            |                                        |
 | `DBSCAN_EPS_MIN`                            | Min epsilon for DBSCAN.                                                                   | `0.1`                                  |
 | `DBSCAN_EPS_MAX`                            | Max epsilon for DBSCAN.                                                                   | `0.5`                                  |
@@ -164,17 +167,50 @@ These are the default parameters used when launching analysis or clustering task
 | `SCORE_WEIGHT_SILHOUETTE`                   | Weight for Silhouette Score (cluster separation).                                         | `0.0`                                  |
 | `SCORE_WEIGHT_DAVIES_BOULDIN`               | Weight for Davies-Bouldin Index (cluster separation).                                     | `0.0`                                  |
 | `SCORE_WEIGHT_CALINSKI_HARABASZ`            | Weight for Calinski-Harabasz Index (cluster separation).                                  | `0.0`                                  |
+| **Lyrics & SemGrove (Semantic + Groove) Search** |                                                                                      |                                        |
+| `LYRICS_ENABLED`                            | When `false`, the lyrics transcription/embedding step is skipped entirely during analysis. | `true`                                |
+| `LYRICS_LLM_ENABLED`                        | When `true`, uses a local LLM (Qwen2.5-1.5B GGUF) to clean/summarise transcribed lyrics before embedding. | `false`               |
+| `LYRICS_API_ENABLE`                         | When `true`, fetches lyrics from external APIs (slots 1 & 2) before falling back to Whisper transcription. | `true`               |
+| `LYRICS_API_1_URL_TEMPLATE`                 | URL template for lyrics API slot 1. Use `{artist_param}`, `{title_param}` placeholders. e.g. `https://lrclib.net/api/get?{artist_param}={artist}&{title_param}={title}` | `""` |
+| `LYRICS_API_1_ARTIST_PARAM`                 | Query parameter name for the artist in API slot 1.                                        | `artist_name`                          |
+| `LYRICS_API_1_TITLE_PARAM`                  | Query parameter name for the track title in API slot 1.                                   | `track_name`                           |
+| `LYRICS_API_1_LYRICS_FIELD`                 | JSON field name containing the lyrics text in the API slot 1 response.                    | `plainLyrics`                          |
+| `LYRICS_API_1_APIKEY_PARAM`                 | Query parameter name for the API key in slot 1 (leave empty if no key needed).            | `""`                                   |
+| `LYRICS_API_1_APIKEY_VALUE`                 | API key value for slot 1.                                                                  | `""`                                   |
+| `LYRICS_API_1_TIMEOUT`                      | HTTP timeout in seconds for API slot 1.                                                    | `5.0`                                  |
+| `LYRICS_API_2_URL_TEMPLATE`                 | URL template for lyrics API slot 2 (fallback after slot 1).                               | `""`                                   |
+| `LYRICS_API_2_ARTIST_PARAM`                 | Query parameter name for the artist in API slot 2.                                        | `artist`                               |
+| `LYRICS_API_2_TITLE_PARAM`                  | Query parameter name for the track title in API slot 2.                                   | `title`                                |
+| `LYRICS_API_2_LYRICS_FIELD`                 | JSON field name containing the lyrics text in the API slot 2 response.                    | `lyrics`                               |
+| `LYRICS_API_2_APIKEY_PARAM`                 | Query parameter name for the API key in slot 2.                                            | `""`                                   |
+| `LYRICS_API_2_APIKEY_VALUE`                 | API key value for slot 2.                                                                  | `""`                                   |
+| `LYRICS_API_2_TIMEOUT`                      | HTTP timeout in seconds for API slot 2.                                                    | `5.0`                                  |
+| `SEM_GROVE_WEIGHT_LYRICS`                   | Contribution of the lyrics embedding to the merged SemGrove cosine similarity (squared scale factor, [0.0–1.0]). Requires index rebuild after change. | `0.75` |
+| `SEM_GROVE_WEIGHT_AUDIO`                    | Contribution of the MusicNN audio embedding to the merged SemGrove cosine similarity (squared scale factor, [0.0–1.0]). Requires index rebuild after change. | `0.25` |
 
 
 The **AI model** tested for Clustering naming and for the instant playlist functionality are:
+
+March 2026:
+* anthropic/claude-sonnet-4.6 (best performing model)
+* anthropic/claude-haiku-4.5
+* google/gemini-3-flash-preview
+
+Earlier:
 * mistral:7b
 * llama3.1:8b
 * gemini-2.5-pro
 * gemini-1.5-flash-latest
 
-different model could have different parameter and don't work.
+For **selhosting AI** with Ollama these are the ones that worked best when tested in March 2026 (in order):
+1. qwen3.5:9b (largest tested, best performing)
+2. qwen3.5:4b
+3. gemma3:4b
+4. ministral-3:3b (this one is the fastest)
 
-For selhosting we suggest llama, instead for cloud genini.
+The models we tested and compared: llama3.1:8b, llama3.2:1b, llama3.2:3b, gemma3:1b, gemma3:4b, qwen3:0.6b, qwen3:1.7b, qwen2.5:1.5b, qwen3.5:0.8b, qwen3.5:2b, qwen3.5:4b,qwen3.5:9b, deepseek-r1:1.5b, phi4-mini:3.8b, ministral-3:3b, lfm2.5-thinking:1.2b
+
+**Please note:** Different models can have different parameters and don't work. Every time you run the promnpt it can give you different results.
 
 **(*)** For using GEMINI API you need to have a Google account, a free account can be used if needed. Same goes for Mistral. Instead if you want to self-host Ollama here you can find a deployment example:
 
