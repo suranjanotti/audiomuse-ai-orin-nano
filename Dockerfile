@@ -162,9 +162,15 @@ COPY requirements/ /app/requirements/
 # from the NVIDIA Jetson wheel (avoids version conflict with cpu.txt pin)
 RUN echo "Jetson L4T (aarch64): installing common packages"; \
     uv pip install --system --no-cache --index-strategy unsafe-best-match -r /app/requirements/jetson-common.txt || exit 1; \
+    # silero-vad transitively pulls in CPU onnxruntime (different package name from \
+    # onnxruntime-gpu, so they coexist in pip's view but share the onnxruntime/ \
+    # import path). Remove the CPU one cleanly before installing the GPU wheel. \
+    pip3 uninstall -y onnxruntime || true; \
     # Install onnxruntime-gpu 1.23.0 for Jetson JetPack 6 / CUDA 12.6 (cuDNN 9) \
     # Source: https://pypi.jetson-ai-lab.io/jp6/cu126 (built against libcudnn.so.9) \
-    pip3 install --no-cache-dir \
+    # --no-deps --force-reinstall: don't bump numpy/protobuf (which would break numba) \
+    # but still rewrite the package files cleanly into the now-empty onnxruntime/ dir. \
+    pip3 install --no-cache-dir --no-deps --force-reinstall \
         "https://pypi.jetson-ai-lab.io/jp6/cu126/+f/4eb/e6a8902dc7708/onnxruntime_gpu-1.23.0-cp310-cp310-linux_aarch64.whl" || exit 1; \
     echo "Verifying psycopg2 installation..." && \
     python3 -c "import psycopg2; print('psycopg2 OK')" && \

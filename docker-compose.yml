@@ -82,6 +82,9 @@ services:
       # GEMINI_API_KEY: "YOUR_GEMINI_API_KEY_HERE"
       TEMP_DIR: "/app/temp_audio"
       NVIDIA_VISIBLE_DEVICES: "all"
+      # Jetson Tegra GPUs don't expose NVML; without this, torch.cuda allocator
+      # hits an INTERNAL ASSERT (NVML_SUCCESS == r) on the first allocation.
+      PYTORCH_NVML_BASED_CUDA_CHECK: "0"
       # Suppress onnxruntime C++ warning logs (e.g. Conv fallback mode notices)
       ORT_LOGGING_LEVEL: "3"
       # Override Dockerfile CPU-only optimization flags (set for x86 Intel, harmful on Jetson GPU)

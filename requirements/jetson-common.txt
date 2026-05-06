@@ -38,6 +38,10 @@ voyager==2.1.0
 transformers==4.57.6
 huggingface-hub==0.36.2
 sentencepiece==0.2.1
+# onnxruntime-gpu transitive deps that aren't pulled in elsewhere; listed
+# here so the --no-deps Jetson wheel install in the Dockerfile doesn't miss them.
+coloredlogs==15.0.1
+humanfriendly==10.0
 
 # --- v4 pipeline (lyrics: Whisper + Qwen + MarianMT + e5) -------------------
 # torch / torchaudio: Jetson cu126 wheels from pypi.jetson-ai-lab.io so Whisper,
