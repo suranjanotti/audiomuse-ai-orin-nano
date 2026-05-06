@@ -8,7 +8,7 @@ services:
     ports:
       - "6379:6379" # Expose Redis port to the host
     volumes:
-      - redis-data-audiomuse-ai:/data # Persistent storage for Redis data
+      - ./data/redis:/data # Persistent storage for Redis data (host bind mount)
     restart: unless-stopped
 
   # PostgreSQL database service
@@ -22,7 +22,7 @@ services:
     ports:
       - "${POSTGRES_PORT}:5432" # Expose PostgreSQL port to the host
     volumes:
-      - postgres-data-audiomuse-ai:/var/lib/postgresql/data # Persistent storage for PostgreSQL data
+      - ./data/postgres:/var/lib/postgresql/data # Persistent storage for PostgreSQL data (host bind mount)
     restart: unless-stopped
 
   # AudioMuse-AI Flask application service
@@ -50,7 +50,7 @@ services:
       # GEMINI_API_KEY: "YOUR_GEMINI_API_KEY_HERE"
       TEMP_DIR: "/app/temp_audio"
     volumes:
-      - temp-audio-flask:/app/temp_audio
+      - ./data/temp-audio-flask:/app/temp_audio
     depends_on:
       - redis
       - postgres
@@ -95,7 +95,7 @@ services:
       MUSICNN_FORCE_CPU: "1"
       CLAP_FORCE_CPU: "1"
     volumes:
-      - temp-audio-worker:/app/temp_audio
+      - ./data/temp-audio-worker:/app/temp_audio
       - /usr/lib/aarch64-linux-gnu/nvidia/:/usr/lib/aarch64-linux-gnu/nvidia/
       - /usr/lib/aarch64-linux-gnu/tegra/:/usr/lib/aarch64-linux-gnu/tegra/
       - /usr/local/cuda/lib64/:/usr/local/cuda/lib64/
@@ -105,9 +105,4 @@ services:
       - postgres
     restart: unless-stopped
 
-# Define volumes for persistent data and temporary files
-volumes:
-  redis-data-audiomuse-ai:
-  postgres-data-audiomuse-ai:
-  temp-audio-flask:
-  temp-audio-worker:
+# All persistent data lives under ./data/ on the host (no named volumes).
