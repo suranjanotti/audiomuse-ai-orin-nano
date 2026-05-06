@@ -58,3 +58,6 @@ CLAMP3/*.npy
 mulan_model_export/
 .cache/
 *.tar.gz
+
+# Persistent host bind-mount data (postgres uid 70 = unreadable to build context)
+/data/
