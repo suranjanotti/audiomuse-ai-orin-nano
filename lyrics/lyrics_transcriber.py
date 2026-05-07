@@ -279,6 +279,23 @@ def load_whisper_model(model_name: str = 'small', device: Optional[str] = None,
             and getattr(_whisper_model, '_lyrics_device', None) == resolved_device):
         return _whisper_model
 
+    # Cached model is for a different device (or stale). Evict before reload
+    # so we don't briefly hold two Whisper-small instances in unified memory.
+    if _whisper_model is not None:
+        _whisper_model = None
+        _whisper_model_name = None
+        try:
+            import gc
+            gc.collect()
+        except Exception:
+            pass
+        try:
+            import torch as _torch_evict
+            if _torch_evict.cuda.is_available():
+                _torch_evict.cuda.empty_cache()
+        except Exception:
+            pass
+
     try:
         from config import LYRICS_MODEL_DIR
     except Exception:
@@ -292,7 +309,20 @@ def load_whisper_model(model_name: str = 'small', device: Optional[str] = None,
         _whisper_model = whisper.load_model(target, device=resolved_device, download_root=LYRICS_MODEL_DIR)
     except Exception as exc:
         _log_memory_state(prefix=f"Whisper load failed on device={resolved_device!r} ({exc!r}) | ")
-        raise
+        # If GPU failed, run THIS track on CPU. The module-level cache is
+        # keyed by the model's _lyrics_device, so the next track sees a
+        # mismatch and automatically tries CUDA again.
+        if resolved_device == 'cuda':
+            logger.warning('Whisper GPU load failed; falling back to CPU for this track only. '
+                           'Next track will retry CUDA.')
+            try:
+                _whisper_model = whisper.load_model(target, device='cpu', download_root=LYRICS_MODEL_DIR)
+                resolved_device = 'cpu'
+            except Exception as cpu_exc:
+                _log_memory_state(prefix=f"Whisper CPU fallback also failed ({cpu_exc!r}) | ")
+                raise
+        else:
+            raise
     try:
         setattr(_whisper_model, '_lyrics_device', resolved_device)
     except Exception:
