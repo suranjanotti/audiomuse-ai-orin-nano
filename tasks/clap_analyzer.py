@@ -554,7 +554,7 @@ def analyze_audio_file(audio_path: str) -> Tuple[Optional[np.ndarray], float, in
                     )
                     comprehensive_memory_cleanup(force_cuda=True, reset_onnx_pool=True)
                     try:
-                        cpu_session = ort.InferenceSession(
+                        cpu_session = _ort.InferenceSession(
                             model_path,
                             sess_options=sess_options,
                             providers=['CPUExecutionProvider'],
