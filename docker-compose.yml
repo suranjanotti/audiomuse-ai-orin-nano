@@ -85,6 +85,11 @@ services:
       # Jetson Tegra GPUs don't expose NVML; without this, torch.cuda allocator
       # hits an INTERNAL ASSERT (NVML_SUCCESS == r) on the first allocation.
       PYTORCH_NVML_BASED_CUDA_CHECK: "0"
+      # Whisper / MarianMT / e5 on CPU. The env var above disables the initial
+      # probe but the in-allocator NVML check still fires under sustained Tegra
+      # memory pressure. Cross-checked with nucboxk9: 163/163 of Orin's
+      # missing-lyrics rows have valid lyrics on Intel - all Whisper failures.
+      LYRICS_USE_GPU: "false"
       # Suppress onnxruntime C++ warning logs (e.g. Conv fallback mode notices)
       ORT_LOGGING_LEVEL: "3"
       # Override Dockerfile CPU-only optimization flags (set for x86 Intel, harmful on Jetson GPU)
