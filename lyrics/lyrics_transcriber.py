@@ -227,6 +227,42 @@ def _resolve_lyrics_device() -> str:
     return _lyrics_device_cache
 
 
+def _log_memory_state(prefix: str = "") -> None:
+    """Log host (and CUDA, if available) memory at a failure point.
+
+    On Jetson devices CPU and GPU share one DRAM pool, so the host numbers
+    are the most informative; the cuda numbers tell us how much torch
+    thinks it has reserved/allocated."""
+    try:
+        import psutil
+        vm = psutil.virtual_memory()
+        host_msg = (f"host: total={vm.total / 1e9:.2f}GB "
+                    f"avail={vm.available / 1e9:.2f}GB "
+                    f"used={vm.used / 1e9:.2f}GB ({vm.percent:.0f}%)")
+    except Exception as exc:
+        host_msg = f"host: psutil failed: {exc!r}"
+
+    cuda_msg = ""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            try:
+                free, total = torch.cuda.mem_get_info()
+                cuda_msg = (f" | cuda: free={free / 1e9:.2f}GB "
+                            f"total={total / 1e9:.2f}GB")
+            except Exception as exc:
+                cuda_msg = f" | cuda: mem_get_info failed: {exc!r}"
+            try:
+                cuda_msg += (f" reserved={torch.cuda.memory_reserved() / 1e9:.2f}GB "
+                             f"allocated={torch.cuda.memory_allocated() / 1e9:.2f}GB")
+            except Exception:
+                pass
+    except Exception as exc:
+        cuda_msg = f" | cuda: torch unavailable: {exc!r}"
+
+    logger.warning(f"{prefix}{host_msg}{cuda_msg}")
+
+
 def load_whisper_model(model_name: str = 'small', device: Optional[str] = None,
                       num_threads: Optional[int] = None):
     global _whisper_model, _whisper_model_name
@@ -252,7 +288,11 @@ def load_whisper_model(model_name: str = 'small', device: Optional[str] = None,
     target = local_pt if os.path.isfile(local_pt) else model_name
     logger.info('Loading Whisper model %r (device=%s, threads=%s) from %s',
                 model_name, resolved_device, threads, target)
-    _whisper_model = whisper.load_model(target, device=resolved_device, download_root=LYRICS_MODEL_DIR)
+    try:
+        _whisper_model = whisper.load_model(target, device=resolved_device, download_root=LYRICS_MODEL_DIR)
+    except Exception as exc:
+        _log_memory_state(prefix=f"Whisper load failed on device={resolved_device!r} ({exc!r}) | ")
+        raise
     try:
         setattr(_whisper_model, '_lyrics_device', resolved_device)
     except Exception:
